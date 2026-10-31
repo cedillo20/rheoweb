@@ -8,7 +8,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from engine import PYRHEO, available_models, run_fit
+from engine import IMPORT_ERROR, PYRHEO, available_models, run_fit
 
 MAX_BYTES = 5 * 1024 * 1024
 MAX_ROWS = 3000
@@ -31,7 +31,7 @@ def read_table(upload: UploadFile, raw: bytes) -> pd.DataFrame:
 
 @app.get("/api/status")
 def status():
-    return {"pyrheo": PYRHEO, "models": {t: available_models(t) for t in ("creep", "relaxation", "saos", "steady")}}
+    return {"pyrheo": PYRHEO, "import_error": IMPORT_ERROR, "models": {t: available_models(t) for t in ("creep", "relaxation", "saos", "steady")}}
 
 
 @app.post("/api/preview")
