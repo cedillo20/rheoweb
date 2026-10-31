@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyRheo Web</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:wght@500;600&family=Public+Sans:wght@400;500;600&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.35.2/plotly.min.js"></script>
+<style>
+:root{--bg:#e9eef2;--panel:#f8fafb;--ink:#17222d;--mute:#5b6a77;--line:#c9d3db;--acc:#0b5d73;--acc2:#b4472b;--ok:#2d6a4f}
+@media (prefers-color-scheme:dark){:root{--bg:#10171d;--panel:#18222b;--ink:#e6edf2;--mute:#93a3b0;--line:#2b3946;--acc:#5fc0d8;--acc2:#e8896b;--ok:#7bc89c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 "Public Sans",system-ui,sans-serif}
+header{padding:28px 24px 8px;max-width:1180px;margin:auto}
+h1{font:600 34px/1.1 "Newsreader",Georgia,serif;margin:0 0 6px}
+header p{margin:0;color:var(--mute);max-width:62ch}
+main{max-width:1180px;margin:auto;padding:16px 24px 60px;display:grid;grid-template-columns:340px 1fr;gap:20px;align-items:start}
+@media(max-width:860px){main{grid-template-columns:1fr}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px}
+h2{font:600 17px "Newsreader",Georgia,serif;margin:0 0 10px}
+label{display:block;font-weight:500;margin:12px 0 4px}
+select,input[type=file]{width:100%;padding:8px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--ink);font:inherit}
+.drop{border:1.5px dashed var(--acc);border-radius:6px;padding:16px;text-align:center;color:var(--mute);cursor:pointer}
+.drop.on{background:color-mix(in srgb,var(--acc) 10%,transparent)}
+.models{display:grid;gap:2px}.models label{font-weight:400;margin:0;display:flex;gap:8px;align-items:center}
+button{font:600 15px "Public Sans";padding:10px 16px;border-radius:4px;border:1px solid var(--acc);background:var(--acc);color:var(--bg);cursor:pointer}
+button.ghost{background:transparent;color:var(--acc)}
+button:disabled{opacity:.5;cursor:wait}
+button:focus-visible,select:focus-visible,.drop:focus-visible{outline:3px solid var(--acc2);outline-offset:2px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+.scroll{overflow-x:auto}
+.msg{padding:10px 12px;border-radius:4px;margin-top:12px}.err{background:color-mix(in srgb,var(--acc2) 15%,transparent)}.info{background:color-mix(in srgb,var(--acc) 12%,transparent)}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.stack>*+*{margin-top:18px}
+small{color:var(--mute)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Ajuste de modelos reológicos</h1>
+  <p>Sube tus datos, elige el ensayo y compara modelos viscoelásticos con pyRheo.</p>
+</header>
+<main>
+  <section>
+    <h2>Datos</h2>
+    <div class="drop" id="drop" tabindex="0" role="button">Arrastra un .xlsx o .csv, o haz clic para elegir</div>
+    <input type="file" id="file" accept=".xlsx,.xls,.csv" hidden>
+    <small id="fname"></small>
+    <label for="test">Tipo de ensayo</label>
+    <select id="test">
+      <option value="relaxation">Relajación de esfuerzos G(t)</option>
+      <option value="creep">Creep J(t)</option>
+      <option value="saos">SAOS G′(ω), G″(ω)</option>
+      <option value="steady">Flujo estacionario η(γ̇)</option>
+    </select>
+    <label for="xc" id="xl">Columna de tiempo</label><select id="xc"></select>
+    <label for="yc" id="yl">Columna G(t)</label><select id="yc"></select>
+    <div id="y2w" hidden><label for="y2c">Columna G″</label><select id="y2c"></select></div>
+    <label>Modelos</label>
+    <div class="models" id="models"></div>
+    <div class="row"><button id="run" disabled>Ajustar</button></div>
+    <div id="msg"></div>
+  </section>
+
+  <div class="stack">
+    <section id="prev" hidden><h2>Vista previa</h2><div class="scroll" id="prevt"></div></section>
+    <section id="res" hidden>
+      <h2>Curvas</h2>
+      <div id="plot" style="height:430px"></div>
+      <div class="row">
+        <button class="ghost" id="png">Descargar gráfica (PNG)</button>
+        <button class="ghost" id="csv">Descargar resultados (CSV)</button>
+      </div>
+      <h2 style="margin-top:22px">Comparación de modelos</h2>
+      <div class="scroll" id="metrics"></div>
+      <small>R² lineal puede ser engañoso con datos que abarcan varias décadas; R² log se calcula sobre log₁₀ de los datos. RSS<sub>w</sub> es el residual ponderado que pyRheo minimiza.</small>
+      <h2 style="margin-top:22px">Parámetros</h2>
+      <div class="scroll" id="params"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const LABELS = {relaxation:["Columna de tiempo","Columna G(t)"],creep:["Columna de tiempo","Columna J(t)"],
+  saos:["Columna ω","Columna G′"],steady:["Columna γ̇","Columna η"]};
+const AXES = {relaxation:["t [s]","G(t) [Pa]"],creep:["t [s]","J(t) [1/Pa]"],saos:["ω [rad/s]","G′, G″ [Pa]"],steady:["γ̇ [1/s]","η [Pa·s]"]};
+const COLORS = ["#b4472b","#0b5d73","#2d6a4f","#8a5a00","#6b3fa0","#444"];
+let file = null, status = null, last = null;
+
+const esc = s => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const fmt = v => (v === null || v === undefined || Number.isNaN(v)) ? "—" : (Math.abs(v) >= 1e4 || (Math.abs(v) < 1e-2 && v !== 0) ? v.toExponential(3) : Number(v.toPrecision(4)).toString());
+const note = (t, k="info") => $("msg").innerHTML = t ? `<div class="msg ${k}">${esc(t)}</div>` : "";
+
+fetch("/api/status").then(r => r.json()).then(s => { status = s; renderModels();
+  if (!s.pyrheo) note("pyRheo no está instalado en el servidor: se usan modelos clásicos de respaldo (Maxwell, SpringPot, etc.).");
+});
+
+function renderModels() {
+  const t = $("test").value, list = status ? status.models[t] : [];
+  $("models").innerHTML = list.map((m, i) => `<label><input type="checkbox" value="${m}" ${i < 2 ? "checked" : ""}> ${m}</label>`).join("");
+  $("xl").textContent = LABELS[t][0]; $("yl").textContent = LABELS[t][1];
+  $("y2w").hidden = t !== "saos";
+  guessCols();
+}
+$("test").onchange = renderModels;
+
+function guessCols() {
+  const opts = [...$("xc").options].map(o => o.value); if (!opts.length) return;
+  const find = re => opts.find(o => re.test(o.toLowerCase()));
+  const t = $("test").value;
+  const g = {relaxation:[/^t|time|tiempo/,/^g|modul|módul/], creep:[/^t|time|tiempo/,/^j|compl/],
+    saos:[/^w|ω|omega|freq|frec/,/g'|g′|storage|almac|^g1|g_p/], steady:[/shear.?rate|γ|gamma|rate|veloc/,/visc|η|eta/]}[t];
+  $("xc").value = find(g[0]) || opts[0];
+  $("yc").value = find(g[1]) || opts[Math.min(1, opts.length - 1)];
+  $("y2c").value = find(/g''|g″|loss|p[eé]rd|^g2|g_pp/) || opts[Math.min(2, opts.length - 1)];
+}
+
+const drop = $("drop");
+drop.onclick = () => $("file").click();
+drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") $("file").click(); };
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("on"); };
+drop.ondragleave = () => drop.classList.remove("on");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("on"); load(e.dataTransfer.files[0]); };
+$("file").onchange = e => load(e.target.files[0]);
+
+async function load(f) {
+  if (!f) return;
+  file = f; $("fname").textContent = f.name; note("");
+  const fd = new FormData(); fd.append("file", f);
+  const r = await fetch("/api/preview", {method:"POST", body:fd});
+  const d = await r.json();
+  if (!r.ok) { note(d.detail || "Error al leer el archivo.", "err"); return; }
+  for (const id of ["xc","yc","y2c"]) $(id).innerHTML = d.columns.map(c => `<option>${esc(c)}</option>`).join("");
+  guessCols();
+  $("prevt").innerHTML = `<table><tr>${d.columns.map(c => `<th>${esc(c)}</th>`).join("")}</tr>` +
+    d.head.map(r => `<tr>${r.map(v => `<td>${v === null ? "" : esc(v)}</td>`).join("")}</tr>`).join("") + `</table><small>${d.rows} filas</small>`;
+  $("prev").hidden = false; $("run").disabled = false;
+}
+
+$("run").onclick = async () => {
+  const models = [...document.querySelectorAll("#models input:checked")].map(i => i.value);
+  if (!models.length) { note("Elige al menos un modelo.", "err"); return; }
+  const fd = new FormData(), t = $("test").value;
+  fd.append("file", file); fd.append("test", t); fd.append("x_col", $("xc").value);
+  fd.append("y_col", $("yc").value); fd.append("y2_col", t === "saos" ? $("y2c").value : "");
+  fd.append("models", JSON.stringify(models));
+  $("run").disabled = true; $("run").textContent = "Ajustando…"; note("");
+  try {
+    const r = await fetch("/api/fit", {method:"POST", body:fd}), d = await r.json();
+    if (!r.ok) throw new Error(d.detail || "Error en el ajuste.");
+    last = {...d, test:t}; show(last);
+  } catch (e) { note(e.message, "err"); }
+  $("run").disabled = false; $("run").textContent = "Ajustar";
+};
+
+function show(d) {
+  const ok = d.results.filter(r => !r.error), traces = [];
+  const names = d.test === "saos" ? ["G′", "G″"] : [AXES[d.test][1].split(" ")[0]];
+  d.ys.forEach((y, i) => traces.push({x:d.x, y, mode:"markers", name:"Datos " + names[i], marker:{size:7, color:i ? "#8a97a3" : "#17222d", symbol:i ? "square" : "circle", opacity:.75}}));
+  ok.forEach((r, k) => r.curve_y.forEach((cy, i) => traces.push({x:r.curve_x, y:cy, mode:"lines", name:`${r.model}${d.test === "saos" ? " " + names[i] : ""}`,
+    line:{color:COLORS[k % COLORS.length], width:2.2, dash:i ? "dash" : "solid"}})));
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches, fg = dark ? "#e6edf2" : "#17222d";
+  Plotly.newPlot("plot", traces, {xaxis:{type:"log", title:AXES[d.test][0], color:fg, gridcolor:dark ? "#2b3946" : "#d9e1e7"},
+    yaxis:{type:"log", title:AXES[d.test][1], color:fg, gridcolor:dark ? "#2b3946" : "#d9e1e7"},
+    paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:fg}, margin:{t:10, r:10}, legend:{orientation:"h", y:-0.22}}, {responsive:true});
+
+  $("metrics").innerHTML = `<table><tr><th>Modelo</th><th>R²</th><th>R² log</th><th>RSS<sub>w</sub></th></tr>` + d.results.map(r => r.error
+    ? `<tr><td>${esc(r.requested)}</td><td colspan="3">${esc(r.error)}</td></tr>`
+    : `<tr><td>${esc(r.model)}${r.requested === "auto" ? " <small>(auto)</small>" : ""}</td><td>${fmt(r.r2)}</td><td>${fmt(r.r2_log)}</td><td>${fmt(r.rss_w)}</td></tr>`).join("") + `</table>`;
+  $("params").innerHTML = `<table><tr><th>Modelo</th><th>Parámetro</th><th>Valor</th></tr>` + ok.flatMap(r =>
+    Object.entries(r.params).map(([k, v]) => `<tr><td>${esc(r.model)}</td><td>${esc(k)}</td><td>${fmt(v)}</td></tr>`)).join("") + `</table>`;
+  $("res").hidden = false; $("res").scrollIntoView({behavior:"smooth", block:"start"});
+}
+
+$("png").onclick = () => Plotly.downloadImage("plot", {format:"png", width:1200, height:760, filename:"pyrheo_ajuste"});
+$("csv").onclick = () => {
+  const rows = [["modelo","parametro","valor","R2","R2_log","RSS_w"]];
+  last.results.filter(r => !r.error).forEach(r => Object.entries(r.params).forEach(([k, v]) => rows.push([r.model, k, v, r.r2, r.r2_log, r.rss_w])));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([rows.map(r => r.join(",")).join("\n")], {type:"text/csv"}));
+  a.download = "pyrheo_resultados.csv"; a.click();
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pandas>=2.0
+openpyxl>=3.1
+xlrd>=2.0
+numpy
+scipy
+# pyRheo y sus dependencias (scikit-optimize, etc.). Verifica el nombre exacto en el repo:
+# https://github.com/mirandi1/pyRheo
+pyRheo
