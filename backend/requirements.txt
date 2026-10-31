@@ -8,4 +8,4 @@ numpy
 scipy
 # pyRheo y sus dependencias (scikit-optimize, etc.). Verifica el nombre exacto en el repo:
 # https://github.com/mirandi1/pyRheo
-pyRheo
+pyRheo @ git+https://github.com/mirandi1/pyRheo.git
