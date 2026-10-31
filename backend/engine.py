@@ -17,7 +17,7 @@ try:  # --- VERIFICAR contra el repo: github.com/mirandi1/pyRheo ---
     PYRHEO = True
 except Exception as e:  # noqa
     PYRHEO = False
-    IMPORT_ERROR= repre(e)
+    IMPORT_ERROR= repr(e)
 
 
 # Modelos de pyRheo (Tabla 2 del paper) por tipo de ensayo
