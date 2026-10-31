@@ -6,6 +6,8 @@ openpyxl>=3.1
 xlrd>=2.0
 numpy
 scipy
-# pyRheo y sus dependencias (scikit-optimize, etc.). Verifica el nombre exacto en el repo:
-# https://github.com/mirandi1/pyRheo
+mpmath
+scikit-optimize
+scikit-learn
+matplotlib
 pyRheo @ git+https://github.com/mirandi1/pyRheo.git
