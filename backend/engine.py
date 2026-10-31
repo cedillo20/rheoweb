@@ -7,14 +7,18 @@ Dos rutas:
 import numpy as np
 from scipy.optimize import least_squares
 
+IMPORT_ERROR=""
+
 try:  # --- VERIFICAR contra el repo: github.com/mirandi1/pyRheo ---
     from pyRheo.creep_model import CreepModel
     from pyRheo.relaxation_model import RelaxationModel
     from pyRheo.oscillation_model import SAOSModel
     from pyRheo.rotation_model import SteadyShearModel
     PYRHEO = True
-except Exception:  # noqa
+except Exception as e:  # noqa
     PYRHEO = False
+    IMPORT_ERROR= repre(e)
+
 
 # Modelos de pyRheo (Tabla 2 del paper) por tipo de ensayo
 PYRHEO_MODELS = {
