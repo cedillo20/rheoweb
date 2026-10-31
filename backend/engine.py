@@ -10,8 +10,8 @@ from scipy.optimize import least_squares
 try:  # --- VERIFICAR contra el repo: github.com/mirandi1/pyRheo ---
     from pyRheo.creep_model import CreepModel
     from pyRheo.relaxation_model import RelaxationModel
-    from pyRheo.saos_model import SAOSModel
-    from pyRheo.steady_shear_model import SteadyShearModel
+    from pyRheo.oscillation_model import SAOSModel
+    from pyRheo.rotation_model import SteadyShearModel
     PYRHEO = True
 except Exception:  # noqa
     PYRHEO = False
