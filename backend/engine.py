@@ -8,6 +8,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 IMPORT_ERROR=""
+NUM_GUESSES = 16  # pyRheo usa 64 por defecto; 16 mantiene el tiempo de respuesta razonable en Render
 
 try:  # --- VERIFICAR contra el repo: github.com/mirandi1/pyRheo ---
     from pyRheo.creep_model import CreepModel
@@ -90,17 +91,24 @@ def _fit_pyrheo(test, model, x, y):
     """VERIFICAR: nombres de clases, argumentos y atributos según el repo/documentación de pyRheo."""
     cls = {"creep": CreepModel, "relaxation": RelaxationModel,
            "saos": SAOSModel, "steady": SteadyShearModel}[test]
-    m = cls(model=model, initial_guess="random", minimization_algorithm="Powell",
-            mittag_leffler_type="Pade32")
+    # Verificado contra el codigo fuente de pyRheo: el argumento es `initial_guesses` (plural);
+    # SAOS y SteadyShear NO aceptan `mittag_leffler_type`; el algoritmo por defecto
+    # de SAOS/Steady es Nelder-Mead y el de creep/relajacion es Powell.
+    kw = dict(model=model, initial_guesses="random", num_initial_guesses=NUM_GUESSES)
+    if test in ("creep", "relaxation"):
+        kw.update(minimization_algorithm="Powell", mittag_leffler_type="Pade32")
+    m = cls(**kw)
     if test == "saos":
         m.fit(x, y[:len(x)], y[len(x):])
         pred = lambda xx: np.concatenate(m.predict(xx))
     else:
         m.fit(x, y)
         pred = lambda xx: np.asarray(m.predict(xx))
-    params = getattr(m, "parameters_", None) or getattr(m, "parameters", {})
-    chosen = getattr(m, "model_name", None) or getattr(m, "model", model)
-    return dict(params), pred, chosen
+    if getattr(m, "params_", None) is None:
+        raise RuntimeError("pyRheo no encontro una solucion para este modelo.")
+    # get_parameters() agrega "Cost" y "Cost Metric" (texto): se descartan.
+    params = {k: v for k, v in m.get_parameters().items() if k not in ("Cost", "Cost Metric")}
+    return params, pred, m.model  # m.model queda con el modelo elegido si se uso "auto"
 
 
 def _r2(y, yhat):
