@@ -106,3 +106,7 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=FRONT), name="static")
+
+
+
+app.mount("/static", StaticFiles(directory=FRONT), name="static")
