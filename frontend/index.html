@@ -66,19 +66,21 @@ small{color:var(--mute)}
     <input type="file" id="file" accept=".xlsx,.xls,.csv" hidden>
     <small id="fname"></small>
     <div id="shw" hidden><label for="sheet">Hoja con los datos</label><select id="sheet"></select></div>
+    <div id="smw" hidden><label for="sample">Muestra</label><select id="sample"></select></div>
     <label for="test">Tipo de ensayo</label>
     <select id="test">
       <option value="relaxation">Relajación de esfuerzos G(t)</option>
       <option value="creep">Creep J(t)</option>
+      <option value="tension">Tensión σ–ε</option>
       <option value="saos">SAOS G′(ω), G″(ω)</option>
       <option value="steady">Flujo estacionario η(γ̇)</option>
     </select>
     <label for="xc" id="xl">Columna de tiempo</label><select id="xc"></select>
     <label for="yc" id="yl">Columna G(t)</label><select id="yc"></select>
     <div id="y2w" hidden><label for="y2c">Columna G″</label><select id="y2c"></select></div>
-    <label>Modelos</label>
+    <label id="mlab">Modelos</label>
     <div class="models" id="models"></div>
-    <label id="trw" style="display:flex;gap:8px;font-weight:400;margin-top:12px" hidden><input type="checkbox" id="trim" checked> Usar solo desde el pico (quita la rampa de carga)</label>
+    <label id="trw" style="display:flex;gap:8px;font-weight:400;margin-top:12px" hidden><input type="checkbox" id="trim" checked> Usar solo la parte útil (quita la rampa de carga y reinicia el tiempo)</label>
     <div class="row"><button id="run" disabled>Ajustar</button></div>
     <div id="msg"></div>
   </section>
@@ -140,8 +142,8 @@ small{color:var(--mute)}
 <script>
 const $ = id => document.getElementById(id);
 const LABELS = {relaxation:["Columna de tiempo","Columna G(t)"],creep:["Columna de tiempo","Columna J(t)"],
-  saos:["Columna ω","Columna G′"],steady:["Columna γ̇","Columna η"]};
-const AXES = {relaxation:["t [s]","G(t) [Pa]"],creep:["t [s]","J(t) [1/Pa]"],saos:["ω [rad/s]","G′, G″ [Pa]"],steady:["γ̇ [1/s]","η [Pa·s]"]};
+  saos:["Columna ω","Columna G′"],steady:["Columna γ̇","Columna η"],tension:["Columna de deformación","Columna de esfuerzo"]};
+const AXES = {relaxation:["t [s]","G(t) [Pa]"],creep:["t [s]","J(t) [1/Pa]"],saos:["ω [rad/s]","G′, G″ [Pa]"],steady:["γ̇ [1/s]","η [Pa·s]"],tension:["Deformación [%]","Esfuerzo [MPa]"]};
 const COLORS = ["#0b6b3a","#c2571a","#1f5f99","#7a3fa0","#b08a00","#555"];
 
 // Nombres para mostrar (el valor interno que usa pyRheo no cambia)
@@ -163,10 +165,12 @@ fetch("/api/status").then(r => r.json()).then(s => { status = s; renderModels();
 });
 
 function renderModels() {
-  const t = $("test").value, list = status ? status.models[t] : [];
+  const t = $("test").value, list = (status && status.models[t]) || [];
+  $("mlab").hidden = $("models").hidden = t === "tension";
+  $("run").textContent = t === "tension" ? "Analizar" : "Ajustar";
   $("models").innerHTML = list.map((m, i) => `<label><input type="checkbox" value="${m}" ${i < 2 ? "checked" : ""}> ${esc(pretty(m))}</label>`).join("");
   $("xl").textContent = LABELS[t][0]; $("yl").textContent = LABELS[t][1];
-  $("y2w").hidden = t !== "saos"; $("trw").hidden = t !== "relaxation";
+  $("y2w").hidden = t !== "saos"; $("trw").hidden = !(t === "relaxation" || t === "creep");
   guessCols();
 }
 $("test").onchange = renderModels;
@@ -176,7 +180,8 @@ function guessCols() {
   const find = re => opts.find(o => re.test(o.toLowerCase()));
   const t = $("test").value;
   const g = {relaxation:[/^t|time|tiempo/,/^g|modul|módul/], creep:[/^t|time|tiempo/,/^j|compl/],
-    saos:[/^w|ω|omega|freq|frec/,/g'|g′|storage|almac|^g1|g_p/], steady:[/shear.?rate|γ|gamma|rate|veloc/,/visc|η|eta/]}[t];
+    saos:[/^w|ω|omega|freq|frec/,/g'|g′|storage|almac|^g1|g_p/], steady:[/shear.?rate|γ|gamma|rate|veloc/,/visc|η|eta/],
+    tension:[/deform|strain/,/tensi|esfuerzo|stress/]}[t];
   $("xc").value = find(g[0]) || opts[0];
   $("yc").value = find(g[1]) || opts[Math.min(1, opts.length - 1)];
   $("y2c").value = find(/g''|g″|loss|p[eé]rd|^g2|g_pp/) || opts[Math.min(2, opts.length - 1)];
@@ -191,37 +196,62 @@ drop.ondrop = e => { e.preventDefault(); drop.classList.remove("on"); load(e.dat
 $("file").onchange = e => load(e.target.files[0]);
 
 $("sheet").onchange = () => load(file, $("sheet").value);
-async function load(f, sheet) {
+$("sample").onchange = () => load(file, $("sheet").value, $("sample").value);
+async function load(f, sheet, sample) {
   if (!f) return;
   file = f; $("fname").textContent = f.name; note("");
-  const fd = new FormData(); fd.append("file", f); if (sheet) fd.append("sheet", sheet);
-  const r = await fetch("/api/preview", {method:"POST", body:fd});
-  const d = await r.json();
+  const fd = new FormData(); fd.append("file", f); if (sheet) fd.append("sheet", sheet); if (sample) fd.append("sample", sample);
+  let r, d;
+  try { r = await fetch("/api/preview", {method:"POST", body:fd}); d = await r.json(); }
+  catch (e) { note("No pude leer la respuesta del servidor. Si es la primera petición, espera unos segundos y vuelve a intentar.", "err"); return; }
   if (!r.ok) { note(d.detail || "Error al leer el archivo.", "err"); return; }
   $("sheet").innerHTML = d.sheets.map(s => `<option ${s === d.sheet ? "selected" : ""}>${esc(s)}</option>`).join("");
   $("shw").hidden = d.sheets.length < 2;
+  $("sample").innerHTML = (d.samples || []).map(s => `<option ${s === d.sample ? "selected" : ""}>${esc(s)}</option>`).join("");
+  $("smw").hidden = !d.samples || d.samples.length < 2;
   for (const id of ["xc","yc","y2c"]) $(id).innerHTML = d.columns.map(c => `<option>${esc(c)}</option>`).join("");
   const g = d.guess || {};
   if (g.test) { $("test").value = g.test; }
   renderModels();
   if (g.x) $("xc").value = g.x; if (g.y) $("yc").value = g.y; if (g.y2) $("y2c").value = g.y2;
   $("prevt").innerHTML = `<table><tr>${d.columns.map(c => `<th>${esc(c)}</th>`).join("")}</tr>` +
-    d.head.map(r => `<tr>${r.map(v => `<td>${v === null ? "" : esc(v)}</td>`).join("")}</tr>`).join("") + `</table><small>${d.rows} filas de datos${g.test ? " · ensayo detectado: " + esc($("test").selectedOptions[0].textContent) : ""}</small>`;
+    d.head.map(r => `<tr>${r.map(v => `<td>${v === null ? "" : esc(v)}</td>`).join("")}</tr>`).join("") + `</table><small>${d.rows} filas de datos${d.format ? " · formato " + esc(d.format) : ""}${g.test ? " · ensayo detectado: " + esc($("test").selectedOptions[0].textContent) : ""}</small>`;
   $("prev").hidden = false; $("run").disabled = false;
 }
 
+async function runTensile() {
+  const fd = new FormData();
+  fd.append("file", file); fd.append("sheet", $("sheet").value); fd.append("x_col", $("xc").value); fd.append("y_col", $("yc").value);
+  $("run").disabled = true; $("run").textContent = "Analizando…"; note("");
+  try {
+    const r = await fetch("/api/tensile", {method:"POST", body:fd}), d = await r.json();
+    if (!r.ok) throw new Error(d.detail || "Error en el análisis.");
+    last = {test:"tension", tensile:d.results};
+    const traces = d.results.map((s, k) => ({x:s.strain, y:s.stress, mode:"lines", name:s.sample, line:{color:COLORS[k % COLORS.length], width:2.2}}));
+    Plotly.newPlot("plot", traces, {xaxis:{title:AXES.tension[0], gridcolor:"#d9e1e7"}, yaxis:{title:AXES.tension[1], gridcolor:"#d9e1e7"},
+      paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:"#17222d"}, margin:{t:10, r:10}, legend:{orientation:"h", y:-0.22}}, {responsive:true});
+    $("metrics").innerHTML = `<table><tr><th>Muestra</th><th>E [MPa]</th><th>σ máx [MPa]</th><th>ε en σ máx [%]</th><th>ε a ruptura [%]</th></tr>` +
+      d.results.map(s => `<tr><td>${esc(s.sample)}</td><td>${fmt(s.E)}</td><td>${fmt(s.sigma_max)}</td><td>${fmt(s.eps_at_sigma_max)}</td><td>${fmt(s.eps_break)}</td></tr>`).join("") + `</table>`;
+    $("params").innerHTML = `<small>E es la pendiente máxima de la curva σ–ε antes del esfuerzo máximo (regresión en ventanas deslizantes). ε a ruptura es la deformación donde el esfuerzo cae por debajo de 50 % del máximo. Este análisis no usa pyRheo.</small>`;
+    $("res").hidden = false; $("res").scrollIntoView({behavior:"smooth", block:"start"});
+  } catch (e) { note(e.message, "err"); }
+  $("run").disabled = false; $("run").textContent = "Analizar";
+}
+
 $("run").onclick = async () => {
+  if ($("test").value === "tension") return runTensile();
   const models = [...document.querySelectorAll("#models input:checked")].map(i => i.value);
   if (!models.length) { note("Elige al menos un modelo.", "err"); return; }
   const fd = new FormData(), t = $("test").value;
   fd.append("file", file); fd.append("test", t); fd.append("x_col", $("xc").value);
   fd.append("y_col", $("yc").value); fd.append("y2_col", t === "saos" ? $("y2c").value : "");
-  fd.append("models", JSON.stringify(models)); fd.append("sheet", $("sheet").value); fd.append("trim", $("trim").checked ? "1" : "0");
+  fd.append("models", JSON.stringify(models)); fd.append("sheet", $("sheet").value); fd.append("sample", $("sample").value); fd.append("trim", $("trim").checked ? "1" : "0");
   $("run").disabled = true; $("run").textContent = "Ajustando…"; note("");
   try {
     const r = await fetch("/api/fit", {method:"POST", body:fd}), d = await r.json();
     if (!r.ok) throw new Error(d.detail || "Error en el ajuste.");
     last = {...d, test:t}; show(last);
+    if (d.note) note(d.note);
   } catch (e) { note(e.message, "err"); }
   $("run").disabled = false; $("run").textContent = "Ajustar";
 };
@@ -233,8 +263,9 @@ function show(d) {
   ok.forEach((r, k) => r.curve_y.forEach((cy, i) => traces.push({x:r.curve_x, y:cy, mode:"lines", name:`${pretty(r.model)}${d.test === "saos" ? " " + names[i] : ""}`,
     line:{color:COLORS[k % COLORS.length], width:2.2, dash:i ? "dash" : "solid"}})));
   const dark = false, fg = dark ? "#e6edf2" : "#17222d";
-  Plotly.newPlot("plot", traces, {xaxis:{type:"log", title:AXES[d.test][0], color:fg, gridcolor:dark ? "#2b3946" : "#d9e1e7"},
-    yaxis:{type:"log", title:AXES[d.test][1], color:fg, gridcolor:dark ? "#2b3946" : "#d9e1e7"},
+  const ax = d.axes || AXES[d.test];
+  Plotly.newPlot("plot", traces, {xaxis:{type:"log", title:ax[0], color:fg, gridcolor:dark ? "#2b3946" : "#d9e1e7"},
+    yaxis:{type:"log", title:ax[1], color:fg, gridcolor:dark ? "#2b3946" : "#d9e1e7"},
     paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:fg}, margin:{t:10, r:10}, legend:{orientation:"h", y:-0.22}}, {responsive:true});
 
   $("metrics").innerHTML = `<table><tr><th>Modelo</th><th>R²</th><th>R² log</th><th>RSS<sub>w</sub></th></tr>` + d.results.map(r => r.error
@@ -247,6 +278,7 @@ function show(d) {
 
 $("png").onclick = () => Plotly.downloadImage("plot", {format:"png", width:1200, height:760, filename:"pyrheo_ajuste"});
 $("csv").onclick = () => {
+  if (!last || !last.results) return;
   const rows = [["modelo","parametro","valor","R2","R2_log","RSS_w"]];
   last.results.filter(r => !r.error).forEach(r => Object.entries(r.params).forEach(([k, v]) => rows.push([r.model, k, v, r.r2, r.r2_log, r.rss_w])));
   const a = document.createElement("a");
