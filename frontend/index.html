@@ -56,7 +56,7 @@ th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-
 .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
 .stack>*+*{margin-top:18px}
 .hrow{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}.hrow h2{margin:0}
-.dl{display:flex;align-items:center;gap:8px;color:var(--mute);font-size:13.5px}
+.dl{display:flex;align-items:center;gap:8px;font-size:13.5px}.dl span{font-weight:600;color:var(--ink)}
 button.sm{padding:5px 14px;font-size:13.5px}
 small{color:var(--mute)}
 .tabs{display:flex;gap:4px;margin-top:16px}
@@ -322,7 +322,7 @@ $("run").onclick = async () => {
   try {
     const r = await fetch("/api/fit", {method:"POST", body:fd}), d = await r.json();
     if (!r.ok) throw new Error(d.detail || "Error en el ajuste.");
-    last = {...d, test:t, meta:{archivo:file.name, hoja:fd.get("sheet"), muestra:fd.get("sample"), columna_x:fd.get("x_col"), columna_y:fd.get("y_col"),
+    last = {...d, test:t, meta:{archivo:file.name, hoja:fd.get("sheet"), muestra:fd.get("sample"), n_muestras:$("sample").options.length, columna_x:fd.get("x_col"), columna_y:fd.get("y_col"),
       columna_y2:fd.get("y2_col"), quitar_rampa:fd.get("trim") === "1", modelos_solicitados:models}}; show(last);
     if (d.note) note(d.note);
   } catch (e) { note(e.message, "err"); }
@@ -358,7 +358,18 @@ function save(content, name, type) {
   a.href = URL.createObjectURL(content instanceof Blob ? content : new Blob([content], {type}));
   a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
-const plotImage = async format => (await fetch(await Plotly.toImage("plot", {format, width:1200, height:760}))).blob();
+// Título de la imagen descargada: «Ajuste de <archivo>» (sin extensión; con la muestra si el archivo trae varias)
+function plotTitle() {
+  const m = last.meta || {}, name = String(m.archivo || "").replace(/\.[^.]+$/, "");
+  if (last.test === "tension") return "Ensayo de tensión de " + name;
+  return "Ajuste de " + name + (m.muestra && m.n_muestras > 1 ? " · " + m.muestra : "");
+}
+// La imagen se genera de una copia de la gráfica con título y fondo blanco; la gráfica en pantalla no cambia
+const plotImage = async format => {
+  const gd = $("plot"), layout = {...gd.layout, title:{text:esc(plotTitle()), font:{size:20, color:"#17222d"}, x:0.5, xanchor:"center"},
+    margin:{...gd.layout.margin, t:70}, paper_bgcolor:"#ffffff", plot_bgcolor:"#ffffff"};
+  return (await fetch(await Plotly.toImage({data:gd.data, layout}, {format, width:1200, height:760}))).blob();
+};
 function csvText(d) {
   const rows = [];
   if (d.test === "tension") {
@@ -442,7 +453,7 @@ function pyCode(d) {
     else L.push(`    ax.plot(a["x"], a["y"], "-", color=c, lw=2, label=f"{a['nombre']} (R² log = {a['r2_log']:.4f})")`);
     L.push(`ax.set_xscale("log")`, `ax.set_yscale("log")`, `ax.set_xlabel(${pyStr(ax[0])})`, `ax.set_ylabel(${pyStr(ax[1])})`);
   }
-  L.push(`ax.grid(True, which="both", alpha=0.3)`, "ax.legend()", "fig.tight_layout()", `fig.savefig("springplot_grafica.png", dpi=200)`, "plt.show()", "");
+  L.push(`ax.set_title(${pyStr(plotTitle())})`, `ax.grid(True, which="both", alpha=0.3)`, "ax.legend()", "fig.tight_layout()", `fig.savefig("springplot_grafica.png", dpi=200)`, "plt.show()", "");
   return L.join("\n");
 }
 $("pyc").onclick = () => {
