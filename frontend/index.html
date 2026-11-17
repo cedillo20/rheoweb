@@ -7,6 +7,7 @@
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='10' fill='%230b5a33'/%3E%3Cpath d='M9 8V39H41' fill='none' stroke='%23ffffff' stroke-opacity='.4' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M12 17l3-6 5 12 5-12 5 12 3-6' fill='none' stroke='%23ffffff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M33 17c4 0 3 14 8 16' fill='none' stroke='%238cc63f' stroke-width='3.2' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:wght@500;600&family=Public+Sans:wght@400;500;600&display=swap">
 <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <style>
 :root{color-scheme:light;--bg:#ffffff;--panel:#fafcfb;--ink:#1c2a22;--mute:#5d6b63;--line:#d8e0da;--acc:#0b6b3a;--acc2:#c2571a;--hdr:#0b5a33;--hdr2:#8cc63f}
 *{box-sizing:border-box}
@@ -34,6 +35,7 @@ footer p{margin:0 0 6px}
 footer strong{color:var(--ink)}
 footer a{color:var(--acc)}
 main{max-width:1180px;margin:auto;padding:16px 24px 60px;display:grid;grid-template-columns:340px 1fr;gap:20px;align-items:start}
+main>*{min-width:0}
 @media(max-width:860px){main{grid-template-columns:1fr}}
 section{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px;box-shadow:0 1px 2px rgba(20,60,35,.06)}
 h2{font:600 17px "Newsreader",Georgia,serif;margin:0 0 10px}
@@ -53,6 +55,9 @@ th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-
 .msg{padding:10px 12px;border-radius:4px;margin-top:12px}.err{background:color-mix(in srgb,var(--acc2) 15%,transparent)}.info{background:color-mix(in srgb,var(--acc) 12%,transparent)}
 .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
 .stack>*+*{margin-top:18px}
+.hrow{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}.hrow h2{margin:0}
+.dl{display:flex;align-items:center;gap:8px;color:var(--mute);font-size:13.5px}
+button.sm{padding:5px 14px;font-size:13.5px}
 small{color:var(--mute)}
 .tabs{display:flex;gap:4px;margin-top:16px}
 .tabs button{background:transparent;border:0;border-bottom:3px solid transparent;border-radius:0;color:#cfe5d3;padding:10px 14px}
@@ -125,12 +130,16 @@ small{color:var(--mute)}
   <div class="stack">
     <section id="prev" hidden><h2>Vista previa</h2><div class="scroll" id="prevt"></div></section>
     <section id="res" hidden>
-      <h2>Curvas</h2>
+      <div class="hrow">
+        <h2>Curvas</h2>
+        <div class="dl"><span>Descargar gráfica:</span><button class="ghost sm" id="png">PNG</button><button class="ghost sm" id="svg">SVG</button></div>
+      </div>
       <div id="plot" style="height:430px"></div>
       <div class="row">
-        <button class="ghost" id="png">Descargar gráfica (PNG)</button>
+        <button class="ghost" id="json" title="Datos, parámetros, curvas y configuración del ajuste, para poder replicarlo">Descargar ajuste (JSON)</button>
         <button class="ghost" id="csv">Descargar resultados (CSV)</button>
         <button class="ghost" id="pyc">Descargar código (Python)</button>
+        <button id="zip" title="PNG, SVG, JSON, CSV y código Python en un solo archivo">Descargar todo (ZIP)</button>
       </div>
       <h2 style="margin-top:22px">Comparación de modelos</h2>
       <div class="scroll" id="metrics"></div>
@@ -288,7 +297,8 @@ async function runTensile() {
   try {
     const r = await fetch("/api/tensile", {method:"POST", body:fd}), d = await r.json();
     if (!r.ok) throw new Error(d.detail || "Error en el análisis.");
-    last = {test:"tension", tensile:d.results};
+    last = {test:"tension", tensile:d.results, meta:{archivo:file.name, hoja:$("sheet").value, formato:d.format || ""}};
+    $("res").hidden = false;
     const traces = d.results.map((s, k) => ({x:s.strain, y:s.stress, mode:"lines", name:s.sample, line:{color:COLORS[k % COLORS.length], width:2.2}}));
     Plotly.newPlot("plot", traces, {xaxis:{title:AXES.tension[0], gridcolor:"#d9e1e7"}, yaxis:{title:AXES.tension[1], gridcolor:"#d9e1e7"},
       paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:"#17222d"}, margin:{t:10, r:10}, legend:{orientation:"h", y:-0.22}}, {responsive:true});
@@ -312,13 +322,15 @@ $("run").onclick = async () => {
   try {
     const r = await fetch("/api/fit", {method:"POST", body:fd}), d = await r.json();
     if (!r.ok) throw new Error(d.detail || "Error en el ajuste.");
-    last = {...d, test:t}; show(last);
+    last = {...d, test:t, meta:{archivo:file.name, hoja:fd.get("sheet"), muestra:fd.get("sample"), columna_x:fd.get("x_col"), columna_y:fd.get("y_col"),
+      columna_y2:fd.get("y2_col"), quitar_rampa:fd.get("trim") === "1", modelos_solicitados:models}}; show(last);
     if (d.note) note(d.note);
   } catch (e) { note(e.message, "err"); }
   $("run").disabled = false; $("run").textContent = "Ajustar";
 };
 
 function show(d) {
+  $("res").hidden = false;  // visible antes de dibujar, para que Plotly mida el ancho real del recuadro
   const ok = d.results.filter(r => !r.error), traces = [];
   const names = d.test === "saos" ? ["G′", "G″"] : [AXES[d.test][1].split(" ")[0]];
   d.ys.forEach((y, i) => traces.push({x:d.x, y, mode:"markers", name:"Datos " + names[i], marker:{size:7, color:i ? "#8a97a3" : "#17222d", symbol:i ? "square" : "circle", opacity:.75}}));
@@ -338,14 +350,55 @@ function show(d) {
   $("res").hidden = false; $("res").scrollIntoView({behavior:"smooth", block:"start"});
 }
 
-$("png").onclick = () => Plotly.downloadImage("plot", {format:"png", width:1200, height:760, filename:"pyrheo_ajuste"});
-$("csv").onclick = () => {
-  if (!last || !last.results) return;
-  const rows = [["modelo","parametro","valor","R2","R2_log","RSS_w"]];
-  last.results.filter(r => !r.error).forEach(r => Object.entries(r.params).forEach(([k, v]) => rows.push([r.model, k, v, r.r2, r.r2_log, r.rss_w])));
+// ---------- Descargas ----------
+const hasRes = () => last && (last.results || last.tensile);
+const baseName = () => "springplot_" + ({creep:"creep", relaxation:"relajacion", saos:"saos", steady:"flujo", tension:"tension"}[last.test] || "ajuste");
+function save(content, name, type) {
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([rows.map(r => r.join(",")).join("\n")], {type:"text/csv"}));
-  a.download = "pyrheo_resultados.csv"; a.click();
+  a.href = URL.createObjectURL(content instanceof Blob ? content : new Blob([content], {type}));
+  a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+const plotImage = async format => (await fetch(await Plotly.toImage("plot", {format, width:1200, height:760}))).blob();
+function csvText(d) {
+  const rows = [];
+  if (d.test === "tension") {
+    rows.push(["muestra","E_MPa","sigma_max_MPa","eps_en_sigma_max_pct","eps_ruptura_pct"]);
+    d.tensile.forEach(s => rows.push([s.sample, s.E, s.sigma_max, s.eps_at_sigma_max, s.eps_break]));
+  } else {
+    rows.push(["modelo","parametro","valor","R2","R2_log","RSS_w"]);
+    d.results.filter(r => !r.error).forEach(r => Object.entries(r.params).forEach(([k, v]) => rows.push([r.model, k, v, r.r2, r.r2_log, r.rss_w])));
+  }
+  return rows.map(r => r.join(",")).join("\n");
+}
+// JSON del ajuste: todo lo necesario para revisar y replicar el resultado (origen, configuración, datos, parámetros y curvas)
+function fitJson(d) {
+  const base = {aplicacion:"SpringPlot", generado:new Date().toISOString(), ensayo:d.test, origen:d.meta || {}};
+  let o;
+  if (d.test === "tension") o = {...base, unidades:{deformacion:"%", esfuerzo:"MPa"},
+    definiciones:{E:"pendiente máxima de la curva esfuerzo-deformación antes del esfuerzo máximo (regresión en ventanas deslizantes, deformación en fracción)",
+      eps_ruptura:"deformación donde el esfuerzo cae por debajo de 50 % del máximo", curvas:"reducidas a unos 500 puntos por muestra para graficar"},
+    muestras:d.tensile.map(s => ({muestra:s.sample, E:s.E, sigma_max:s.sigma_max, eps_en_sigma_max:s.eps_at_sigma_max, eps_ruptura:s.eps_break, deformacion:s.strain, esfuerzo:s.stress}))};
+  else o = {...base, configuracion:d.settings || null, ejes:d.axes || AXES[d.test], puntos_ajustados:d.n, puntos_validos:d.n_raw, nota:d.note || "",
+    datos:{x:d.x, y:d.ys},
+    resultados:d.results.map(r => r.error ? {modelo_solicitado:r.requested, error:r.error}
+      : {modelo_solicitado:r.requested, modelo:r.model, parametros:r.params, r2:r.r2, r2_log:r.r2_log, rss_w:r.rss_w, curva:{x:r.curve_x, y:r.curve_y}})};
+  // con sangría, pero cada lista de números en una sola línea
+  return JSON.stringify(o, null, 2).replace(/\[[\s\d.eE+,\-]*?\]/g, m => m.replace(/\s+/g, " ").replace("[ ", "[").replace(" ]", "]")).replace(/null,\s+(?=[\d\-n])/g, "null, ");
+}
+$("png").onclick = async () => { if (hasRes()) save(await plotImage("png"), baseName() + ".png"); };
+$("svg").onclick = async () => { if (hasRes()) save(await plotImage("svg"), baseName() + ".svg"); };
+$("json").onclick = () => { if (hasRes()) save(fitJson(last), baseName() + ".json", "application/json"); };
+$("csv").onclick = () => { if (hasRes()) save(csvText(last), baseName() + ".csv", "text/csv"); };
+$("zip").onclick = async () => {
+  if (!hasRes()) return;
+  const b = $("zip"), n = baseName();
+  b.disabled = true; b.textContent = "Preparando…";
+  try {
+    const z = new JSZip(), [png, svg] = await Promise.all([plotImage("png"), plotImage("svg")]);
+    z.file(n + ".png", png); z.file(n + ".svg", svg); z.file(n + ".json", fitJson(last)); z.file(n + ".csv", csvText(last)); z.file(n + ".py", pyCode(last));
+    save(await z.generateAsync({type:"blob"}), n + ".zip");
+  } catch (e) { note("No se pudo crear el ZIP: " + e.message, "err"); }
+  b.disabled = false; b.textContent = "Descargar todo (ZIP)";
 };
 
 // ---------- Código Python de la gráfica ----------
@@ -393,10 +446,7 @@ function pyCode(d) {
   return L.join("\n");
 }
 $("pyc").onclick = () => {
-  if (!last || !(last.results || last.tensile)) return;
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([pyCode(last)], {type:"text/x-python"}));
-  a.download = "springplot_grafica.py"; a.click();
+  if (hasRes()) save(pyCode(last), baseName() + ".py", "text/x-python");
 };
 
 // ---------- Pestañas ----------
@@ -452,6 +502,7 @@ $("pred").onclick = async () => {
     const win = flip ? [1 / hi, 1 / lo] : [lo, hi], vals = d.ys.slice(0, t === "saos" ? 2 : 1).flat().filter(v => v), ymin = Math.min(...vals), ymax = Math.max(...vals);
     win.forEach((w, i) => traces.push({x:[w, w], y:[ymin, ymax], mode:"lines", name:"Rango cubierto por el ensayo", legendgroup:"win", showlegend:i === 0,
       line:{color:"#8a97a3", width:1.5, dash:"dashdot"}, hoverinfo:"skip"}));
+    $("predsec").hidden = false;
     Plotly.newPlot("predplot", traces, {xaxis:{type:"log", title:t === "saos" ? "ω [rad/s]" : "t [s]", color:fg, gridcolor:grid},
       yaxis:{type:"log", title:ytitle, color:fg, gridcolor:grid},
       yaxis2:{type:"log", title:"tan δ", overlaying:"y", side:"right", color:fg, showgrid:false},
