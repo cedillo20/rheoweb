@@ -130,6 +130,7 @@ small{color:var(--mute)}
       <div class="row">
         <button class="ghost" id="png">Descargar gráfica (PNG)</button>
         <button class="ghost" id="csv">Descargar resultados (CSV)</button>
+        <button class="ghost" id="pyc">Descargar código (Python)</button>
       </div>
       <h2 style="margin-top:22px">Comparación de modelos</h2>
       <div class="scroll" id="metrics"></div>
@@ -345,6 +346,57 @@ $("csv").onclick = () => {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([rows.map(r => r.join(",")).join("\n")], {type:"text/csv"}));
   a.download = "pyrheo_resultados.csv"; a.click();
+};
+
+// ---------- Código Python de la gráfica ----------
+// Genera un script con los datos, los parámetros y las curvas ya calculadas: reproduce la gráfica solo con numpy y matplotlib.
+const pyNum = v => (v === null || v === undefined || !isFinite(v)) ? "float('nan')" : String(Number(Number(v).toPrecision(8)));
+const pyArr = a => "np.array([" + a.map(pyNum).join(", ") + "])";
+const pyStr = s => JSON.stringify(String(s));
+function pyCode(d) {
+  const L = [], fecha = new Date().toISOString().slice(0, 10), src = file ? file.name : "";
+  L.push(`"""Gráfica generada por SpringPlot (${fecha}).`, `Archivo de origen: ${src}`, "",
+    "Requiere: pip install numpy matplotlib", `"""`, "import numpy as np", "import matplotlib.pyplot as plt", "");
+  if (d.test === "tension") {
+    L.push("# Curvas esfuerzo-deformación (deformación en %, esfuerzo en MPa) y resumen de cada muestra", "muestras = [");
+    d.tensile.forEach(s => L.push(`    {"nombre": ${pyStr(s.sample)}, "E": ${pyNum(s.E)}, "sigma_max": ${pyNum(s.sigma_max)}, "eps_ruptura": ${pyNum(s.eps_break)},`,
+      `     "deformacion": ${pyArr(s.strain)},`, `     "esfuerzo": ${pyArr(s.stress)}},`));
+    L.push("]", "", "fig, ax = plt.subplots(figsize=(8, 5))", "for m in muestras:",
+      `    ax.plot(m["deformacion"], m["esfuerzo"], lw=2, label=f"{m['nombre']}  (E = {m['E']:.3g} MPa, σ máx = {m['sigma_max']:.3g} MPa)")`,
+      `ax.set_xlabel(${pyStr(AXES.tension[0])})`, `ax.set_ylabel(${pyStr(AXES.tension[1])})`);
+  } else {
+    const ax = d.axes || AXES[d.test], saos = d.test === "saos", ok = d.results.filter(r => !r.error);
+    const mod = {creep:"creep_model", relaxation:"relaxation_model", saos:"oscillation_model", steady:"rotation_model"}[d.test];
+    L.push("# Datos experimentales (los puntos que se ajustaron)", `x = ${pyArr(d.x)}`);
+    d.ys.forEach((y, i) => L.push(`y${saos ? i + 1 : ""} = ${pyArr(y)}`));
+    L.push("", "# Modelos ajustados: parámetros, calidad del ajuste y curva calculada", "ajustes = [");
+    ok.forEach(r => {
+      L.push(`    {"modelo": ${pyStr(r.model)}, "nombre": ${pyStr(pretty(r.model))}, "r2": ${pyNum(r.r2)}, "r2_log": ${pyNum(r.r2_log)},`,
+        `     "parametros": {${Object.entries(r.params).map(([k, v]) => `${pyStr(k)}: ${pyNum(v)}`).join(", ")}},`, `     "x": ${pyArr(r.curve_x)},`);
+      r.curve_y.forEach((cy, i) => L.push(`     "y${saos ? i + 1 : ""}": ${pyArr(cy)},`));
+      L.push("    },");
+    });
+    L.push("]", "", "# Opcional: recalcular las curvas con pyRheo a partir de los parámetros (por ejemplo, en otro rango de x).",
+      "# Necesita: pip install git+https://github.com/mirandi1/pyRheo.git", "RECALCULAR_CON_PYRHEO = False", "if RECALCULAR_CON_PYRHEO:",
+      `    from pyRheo.${mod} import MODEL_FUNCS, MODEL_PARAMS`, "    xx = np.logspace(np.log10(x.min()), np.log10(x.max()), 200)", "    for a in ajustes:",
+      `        yy = np.asarray(MODEL_FUNCS[a["modelo"]](*[a["parametros"][k] for k in MODEL_PARAMS[a["modelo"]]], xx))`, `        a["x"] = xx`,
+      saos ? `        a["y1"], a["y2"] = yy[:len(xx)], yy[len(xx):]` : `        a["y"] = yy`, "",
+      "fig, ax = plt.subplots(figsize=(8, 5))");
+    if (saos) L.push(`ax.plot(x, y1, "o", color="#17222d", ms=5, alpha=0.75, label="Datos G′")`, `ax.plot(x, y2, "s", color="#8a97a3", ms=5, alpha=0.75, label="Datos G″")`);
+    else L.push(`ax.plot(x, y, "o", color="#17222d", ms=5, alpha=0.75, label="Datos")`);
+    L.push(`colores = ${JSON.stringify(COLORS)}`, "for i, a in enumerate(ajustes):", "    c = colores[i % len(colores)]");
+    if (saos) L.push(`    ax.plot(a["x"], a["y1"], "-", color=c, lw=2, label=f"{a['nombre']} G′ (R² log = {a['r2_log']:.4f})")`, `    ax.plot(a["x"], a["y2"], "--", color=c, lw=2, label=f"{a['nombre']} G″")`);
+    else L.push(`    ax.plot(a["x"], a["y"], "-", color=c, lw=2, label=f"{a['nombre']} (R² log = {a['r2_log']:.4f})")`);
+    L.push(`ax.set_xscale("log")`, `ax.set_yscale("log")`, `ax.set_xlabel(${pyStr(ax[0])})`, `ax.set_ylabel(${pyStr(ax[1])})`);
+  }
+  L.push(`ax.grid(True, which="both", alpha=0.3)`, "ax.legend()", "fig.tight_layout()", `fig.savefig("springplot_grafica.png", dpi=200)`, "plt.show()", "");
+  return L.join("\n");
+}
+$("pyc").onclick = () => {
+  if (!last || !(last.results || last.tensile)) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([pyCode(last)], {type:"text/x-python"}));
+  a.download = "springplot_grafica.py"; a.click();
 };
 
 // ---------- Pestañas ----------
