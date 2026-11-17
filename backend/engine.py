@@ -117,6 +117,26 @@ def _r2(y, yhat):
     return float(1 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
 
 
+def fit_settings(test):
+    """Configuracion con la que se ajusta, para incluirla en el JSON descargable (transparencia y replicabilidad)."""
+    if not PYRHEO:
+        return {"motor": "SciPy least_squares (modo de respaldo, sin pyRheo)", "funcion_de_costo": "residual ponderado (y - f)/y",
+                "arranques_aleatorios": 10, "semilla": 0}
+    try:
+        from importlib.metadata import version
+        ver = version("pyRheo")
+    except Exception:  # noqa
+        ver = "desconocida"
+    s = {"motor": "pyRheo", "version_pyrheo": ver, "repositorio": "https://github.com/mirandi1/pyRheo",
+         "initial_guesses": "random", "num_initial_guesses": NUM_GUESSES, "cost_function": "RSS (ponderado por y)",
+         "minimization_algorithm": "Powell" if test in ("creep", "relaxation") else "Nelder-Mead",
+         "semilla": "no fijada: los parametros pueden variar ligeramente entre ejecuciones",
+         "limite_por_modelo_s": MODEL_TIMEOUT}
+    if test in ("creep", "relaxation"):
+        s["mittag_leffler_type"] = "Pade32"
+    return s
+
+
 def predict_response(model, params, target, x):
     """Evalua un modelo ya ajustado en otro tipo de respuesta.
     pyRheo usa los mismos nombres de modelo y de parametros en creep, relajacion y oscilacion,
