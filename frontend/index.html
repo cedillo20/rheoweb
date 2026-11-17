@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RheoWeb</title>
+<title>SpringPlot · ajuste de modelos reológicos</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='10' fill='%230b5a33'/%3E%3Cpath d='M9 8V39H41' fill='none' stroke='%23ffffff' stroke-opacity='.4' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M12 17l3-6 5 12 5-12 5 12 3-6' fill='none' stroke='%23ffffff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M33 17c4 0 3 14 8 16' fill='none' stroke='%238cc63f' stroke-width='3.2' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:wght@500;600&family=Public+Sans:wght@400;500;600&display=swap">
 <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
 <style>
@@ -11,11 +12,22 @@
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 "Public Sans",system-ui,sans-serif}
-header{background:var(--hdr);color:#fff;border-bottom:4px solid var(--hdr2)}
+header{position:relative;overflow:hidden;background:var(--hdr);color:#fff;border-bottom:4px solid var(--hdr2)}
 .in{max-width:1180px;margin:auto;padding:0 24px}
-header .in{padding-top:22px}
-h1{font:700 32px/1.1 "Public Sans",system-ui,sans-serif;letter-spacing:-.01em;margin:0 0 6px}
-header p{margin:0;color:#d7ead9;max-width:62ch}
+header .in{position:relative;padding-top:20px}
+/* fondo decorativo: rejilla logarítmica con una curva de relajación, desvanecida hacia el texto */
+.hdeco{position:absolute;right:0;top:0;height:100%;width:min(52%,640px);pointer-events:none;
+  -webkit-mask-image:linear-gradient(to right,transparent,#000 45%);mask-image:linear-gradient(to right,transparent,#000 45%)}
+.brand{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.brand>div:nth-child(2){flex:1 1 200px;min-width:0}
+.logo{width:56px;height:56px;flex:none;border-radius:12px;background:#0f6b3e;border:1px solid rgba(255,255,255,.2)}
+h1{font:700 30px/1.1 "Public Sans",system-ui,sans-serif;letter-spacing:-.015em;margin:0 0 3px}
+h1 span{color:var(--hdr2)}
+header p{margin:0;color:#d7ead9;max-width:62ch;font-size:14.5px}
+.chips{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+.chip{font-size:12.5px;line-height:1;padding:7px 11px;border:1px solid rgba(255,255,255,.3);border-radius:999px;color:#e3f1e5;text-decoration:none;background:var(--hdr)}
+a.chip:hover,a.chip:focus-visible{border-color:#fff;color:#fff}
+@media(max-width:860px){.hdeco{display:none}.chips{margin-left:0}}
 footer{margin-top:20px;background:#f1f5f2;border-top:1px solid var(--line);color:var(--mute);font-size:13px}
 footer .in{padding-top:18px;padding-bottom:22px}
 footer p{margin:0 0 6px}
@@ -53,9 +65,34 @@ small{color:var(--mute)}
 </head>
 <body>
 <header>
+  <svg class="hdeco" viewBox="0 0 640 200" preserveAspectRatio="xMaxYMid slice" aria-hidden="true">
+    <g stroke="#ffffff" stroke-opacity=".09" stroke-width="1">
+      <path d="M40 0V200M101 0V200M137 0V200M162 0V200M182 0V200M240 0V200M301 0V200M337 0V200M362 0V200M382 0V200M440 0V200M501 0V200M537 0V200M562 0V200M582 0V200M640 0V200"/>
+      <path d="M0 25H640M0 75H640M0 125H640M0 175H640"/>
+    </g>
+    <path d="M0 52C170 54 300 96 640 150" fill="none" stroke="#8cc63f" stroke-opacity=".5" stroke-width="2.5"/>
+    <path d="M0 150C190 146 330 118 640 96" fill="none" stroke="#ffffff" stroke-opacity=".28" stroke-width="2" stroke-dasharray="7 7"/>
+    <g fill="#ffffff" fill-opacity=".55">
+      <circle cx="262" cy="80" r="3.5"/><circle cx="322" cy="94" r="3.5"/><circle cx="384" cy="104" r="3.5"/><circle cx="446" cy="119" r="3.5"/><circle cx="508" cy="127" r="3.5"/><circle cx="570" cy="141" r="3.5"/><circle cx="626" cy="146" r="3.5"/>
+    </g>
+  </svg>
   <div class="in">
-    <h1>RheoWeb</h1>
-    <p>Ajuste de modelos viscoelásticos fraccionarios con pyRheo: sube tus datos y compara modelos.</p>
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 48 48" role="img" aria-label="Logo de SpringPlot: un resorte que se convierte en una curva graficada">
+        <path d="M9 8V39H41" fill="none" stroke="#ffffff" stroke-opacity=".4" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M12 17l3-6 5 12 5-12 5 12 3-6" fill="none" stroke="#ffffff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M33 17c4 0 3 14 8 16" fill="none" stroke="#8cc63f" stroke-width="2.8" stroke-linecap="round"/>
+        <circle cx="41" cy="33" r="2.6" fill="#8cc63f"/>
+      </svg>
+      <div>
+        <h1>Spring<span>Plot</span></h1>
+        <p>Ajuste y predicción de modelos viscoelásticos fraccionarios a partir de tus ensayos.</p>
+      </div>
+      <div class="chips">
+        <span class="chip">Creep · Relajación · SAOS · Tensión</span>
+        <a class="chip" href="https://github.com/mirandi1/pyRheo" target="_blank" rel="noopener">Basado en pyRheo ↗</a>
+      </div>
+    </div>
     <div class="tabs"><button id="tabfit" class="on">Ajuste de datos</button><button id="tab3d">Gráficas 3D</button></div>
   </div>
 </header>
@@ -151,13 +188,13 @@ small{color:var(--mute)}
       <div id="predplot" style="height:430px"></div>
       <small id="prednote"></small>
     </section>
-    <div id="g3plots"></div>
+    <div id="g3plots"><section><small>Pulsa «Graficar» para generar las superficies 3D del modelo fraccionario.</small></section></div>
   </div>
 </main>
 
 <footer>
   <div class="in">
-    <p><strong>RheoWeb</strong> · Página creada por <strong>Evaristo Cedillo Balandrán</strong> · Ingeniería de Materiales, FIME-UANL</p>
+    <p><strong>SpringPlot</strong> ·Página creada por <strong>Evaristo Cedillo Balandrán</strong> · Ingeniería de Materiales, FIME-UANL</p>
     <p>Basada en <a href="https://github.com/mirandi1/pyRheo" target="_blank" rel="noopener">pyRheo</a>, paquete de código abierto de Isaac Y. Miranda-Valdez, Aaro Niinistö, Tero Mäkinen, Juha Lejon, Juha Koivisto y Mikko J. Alava (Aalto University). Referencia: Miranda-Valdez et al., <em>Digital Discovery</em> 2025, 4, 1075–1082, <a href="https://doi.org/10.1039/d5dd00021a" target="_blank" rel="noopener">doi:10.1039/d5dd00021a</a>.</p>
     <p>Proyecto independiente con fines académicos, sin afiliación con los autores de pyRheo.</p>
   </div>
@@ -314,7 +351,7 @@ $("csv").onclick = () => {
 function tab(which) {
   $("vfit").hidden = which !== "fit"; $("v3d").hidden = which !== "3d";
   $("tabfit").classList.toggle("on", which === "fit"); $("tab3d").classList.toggle("on", which === "3d");
-  if (which === "3d") { predSetup(); draw3d(); }
+  if (which === "3d") predSetup();  // las superficies 3D se generan solo al pulsar «Graficar» (tardan unos segundos)
 }
 
 // ---------- Predicción con el modelo ajustado ----------
@@ -416,7 +453,11 @@ function draw3d() {
       paper_bgcolor:"rgba(0,0,0,0)", font:{color:fg}, margin:{t:40, l:0, r:0, b:0}}, {responsive:true});
   }
 }
-$("g3d").onclick = draw3d;
+$("g3d").onclick = () => {
+  // se cede un instante al navegador para que pinte «Graficando…» antes del cálculo, que bloquea la página
+  $("g3d").disabled = true; $("g3d").textContent = "Graficando…";
+  setTimeout(() => { try { draw3d(); } finally { $("g3d").disabled = false; $("g3d").textContent = "Graficar"; } }, 30);
+};
 </script>
 </body>
 </html>
