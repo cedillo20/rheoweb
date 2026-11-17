@@ -104,6 +104,22 @@ small{color:var(--mute)}
 </main>
 
 <main id="v3d" hidden>
+  <div class="stack">
+  <section>
+    <h2>Predicción con tu ajuste</h2>
+    <small>Usa los parámetros de un modelo ya ajustado para calcular otra respuesta del mismo material, por ejemplo G′(ω) y G″(ω) a partir de un ensayo de creep.</small>
+    <div id="pnone" class="msg info">Primero ajusta un ensayo de creep, relajación o SAOS en la pestaña «Ajuste de datos».</div>
+    <div id="pform" hidden>
+      <label for="pmodel">Modelo ajustado</label><select id="pmodel"></select>
+      <label for="ptarget">Respuesta a predecir</label><select id="ptarget"></select>
+      <div class="g2">
+        <div><label for="pX0" id="pX0l">ω mín (10^x)</label><input type="number" id="pX0" step="1"></div>
+        <div><label for="pX1" id="pX1l">ω máx (10^x)</label><input type="number" id="pX1" step="1"></div>
+      </div>
+      <div class="row"><button id="pred">Predecir</button></div>
+    </div>
+    <div id="pmsg"></div>
+  </section>
   <section>
     <h2>Modelo fraccionario (dominio de la frecuencia)</h2>
     <small>E* = E(ωτ)<sup>α</sup>j<sup>α</sup> / (1 + (ωτ)<sup>α</sup>j<sup>α</sup>). Con α = 1 se recupera Maxwell.</small>
@@ -128,7 +144,15 @@ small{color:var(--mute)}
     <div class="row"><button id="g3d">Graficar</button></div>
     <div id="gmsg"></div>
   </section>
-  <div id="g3plots"></div>
+  </div>
+  <div class="stack">
+    <section id="predsec" hidden>
+      <h2 id="predh">Predicción</h2>
+      <div id="predplot" style="height:430px"></div>
+      <small id="prednote"></small>
+    </section>
+    <div id="g3plots"></div>
+  </div>
 </main>
 
 <footer>
@@ -290,8 +314,67 @@ $("csv").onclick = () => {
 function tab(which) {
   $("vfit").hidden = which !== "fit"; $("v3d").hidden = which !== "3d";
   $("tabfit").classList.toggle("on", which === "fit"); $("tab3d").classList.toggle("on", which === "3d");
-  if (which === "3d") draw3d();
+  if (which === "3d") { predSetup(); draw3d(); }
 }
+
+// ---------- Predicción con el modelo ajustado ----------
+// pyRheo usa los mismos parámetros en creep, relajación y oscilación: el servidor evalúa el modelo en la otra respuesta.
+const PT = {saos:"G′(ω) y G″(ω) — oscilación", relaxation:"G(t) — relajación", creep:"J(t) — creep"};
+let predFor = null;
+const predFits = () => (last && last.results && PT[last.test]) ? last.results.filter(r => !r.error) : [];
+function predRange() {
+  // rango por defecto: el que cubre el ensayo (ω ≈ 1/t)
+  const t = $("ptarget").value, src = last.test, xs = last.x, lo = Math.min(...xs), hi = Math.max(...xs);
+  const flip = (t === "saos") !== (src === "saos");
+  const a = flip ? 1 / hi : lo, b = flip ? 1 / lo : hi, s = t === "saos" ? "ω" : "t";
+  $("pX0").value = Math.floor(Math.log10(a)); $("pX1").value = Math.ceil(Math.log10(b));
+  $("pX0l").textContent = `${s} mín (10^x)`; $("pX1l").textContent = `${s} máx (10^x)`;
+}
+function predSetup() {
+  const fits = predFits();
+  $("pnone").hidden = fits.length > 0; $("pform").hidden = !fits.length;
+  if (!fits.length || predFor === last) return;
+  predFor = last; $("predsec").hidden = true; $("pmsg").innerHTML = "";
+  $("pmodel").innerHTML = fits.map((r, i) => `<option value="${i}">${esc(pretty(r.model))} (R² log ${fmt(r.r2_log)})</option>`).join("");
+  $("ptarget").innerHTML = Object.keys(PT).filter(k => k !== last.test).map(k => `<option value="${k}">${PT[k]}</option>`).join("");
+  predRange();
+}
+$("ptarget").onchange = predRange;
+$("pred").onclick = async () => {
+  const fit = predFits()[+$("pmodel").value], t = $("ptarget").value, x0 = parseFloat($("pX0").value), x1 = parseFloat($("pX1").value);
+  const perr = m => $("pmsg").innerHTML = m ? `<div class="msg err">${esc(m)}</div>` : "";
+  if (!fit) return;
+  if (!isFinite(x0) || !isFinite(x1) || x0 >= x1) { perr("Revisa el rango: el mínimo debe ser menor que el máximo."); return; }
+  perr(""); $("pred").disabled = true;
+  try {
+    const r = await fetch("/api/predict", {method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({model:fit.model, params:fit.params, target:t, x_min:x0, x_max:x1})}), d = await r.json();
+    if (!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : "No se pudo calcular la predicción.");
+    const u = last.axes ? "MPa" : "Pa", fg = "#17222d", grid = "#d9e1e7", traces = [];
+    const line = (y, name, color, dash, extra) => traces.push({x:d.x, y, mode:"lines", name, line:{color, width:2.4, dash}, ...extra});
+    let ytitle;
+    if (t === "saos") {
+      line(d.ys[0], "G′", COLORS[0], "solid"); line(d.ys[1], "G″", COLORS[1], "dash");
+      line(d.ys[0].map((g, i) => g && d.ys[1][i] ? d.ys[1][i] / g : null), "tan δ (eje derecho)", COLORS[2], "dot", {yaxis:"y2"});
+      ytitle = `G′, G″ [${u}]`;
+    } else { line(d.ys[0], t === "creep" ? "J(t)" : "G(t)", COLORS[0], "solid"); ytitle = t === "creep" ? `J(t) [1/${u}]` : `G(t) [${u}]`; }
+    // ventana que cubre el ensayo (ω ≈ 1/t): fuera de ella la curva es extrapolación
+    const flip = (t === "saos") !== (last.test === "saos"), lo = Math.min(...last.x), hi = Math.max(...last.x);
+    const win = flip ? [1 / hi, 1 / lo] : [lo, hi], vals = d.ys.slice(0, t === "saos" ? 2 : 1).flat().filter(v => v), ymin = Math.min(...vals), ymax = Math.max(...vals);
+    win.forEach((w, i) => traces.push({x:[w, w], y:[ymin, ymax], mode:"lines", name:"Rango cubierto por el ensayo", legendgroup:"win", showlegend:i === 0,
+      line:{color:"#8a97a3", width:1.5, dash:"dashdot"}, hoverinfo:"skip"}));
+    Plotly.newPlot("predplot", traces, {xaxis:{type:"log", title:t === "saos" ? "ω [rad/s]" : "t [s]", color:fg, gridcolor:grid},
+      yaxis:{type:"log", title:ytitle, color:fg, gridcolor:grid},
+      yaxis2:{type:"log", title:"tan δ", overlaying:"y", side:"right", color:fg, showgrid:false},
+      paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:fg}, margin:{t:10, r:t === "saos" ? 60 : 10}, legend:{orientation:"h", y:-0.22}}, {responsive:true});
+    $("predh").textContent = `Predicción: ${PT[t]}`;
+    $("prednote").textContent = `Modelo ${pretty(fit.model)} ajustado a ${PT[last.test].split(" — ")[1]} (` +
+      Object.entries(fit.params).map(([k, v]) => `${k} = ${fmt(v)}`).join(", ") +
+      `). Es una predicción del modelo, no una medición: entre las líneas grises corresponde al rango de tiempos del ensayo (ω ≈ 1/t); fuera de ellas es extrapolación.`;
+    $("predsec").hidden = false;
+  } catch (e) { perr(e.message); }
+  $("pred").disabled = false;
+};
 $("tabfit").onclick = () => tab("fit"); $("tab3d").onclick = () => tab("3d");
 
 // ---------- Gráficas 3D: modelo fraccionario del pizarrón ----------
