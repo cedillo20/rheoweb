@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Dict
 
-from engine import IMPORT_ERROR, PYRHEO, available_models, predict_response, run_fit
+from engine import IMPORT_ERROR, PYRHEO, available_models, fit_settings, predict_response, run_fit
 
 MAX_BYTES = 10 * 1024 * 1024
 MAX_POINTS = 150  # puntos que se mandan al ajuste (muestreo logarítmico); los ensayos largos traen decenas de miles
@@ -242,7 +242,8 @@ async def fit(file: UploadFile = File(...), test: str = Form(...), x_col: str = 
     ys = [data[c].to_numpy(float) for c in cols[1:]]
     results = run_fit(test, x, ys, json.loads(models))
 
-    resp = {"n": len(x), "n_raw": n_raw, "x": x.tolist(), "ys": [y.tolist() for y in ys], "results": results, "pyrheo": PYRHEO}
+    resp = {"n": len(x), "n_raw": n_raw, "x": x.tolist(), "ys": [y.tolist() for y in ys], "results": results, "pyrheo": PYRHEO,
+            "settings": {**fit_settings(test), "max_puntos_ajuste": MAX_POINTS, "muestreo": "logarítmico en x", "filtro": "solo valores positivos"}}
     if tb["fime"] and test in ("creep", "relaxation"):
         resp["axes"] = ["t [s]", "J(t) [1/MPa]" if test == "creep" else "G(t) [MPa]"]
         resp["note"] = (f"Formato FIME, muestra {tb['sample']}. " +
