@@ -117,28 +117,93 @@ def _r2(y, yhat):
     return float(1 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
 
 
+def predict_response(model, params, target, x):
+    """Evalua un modelo ya ajustado en otro tipo de respuesta.
+    pyRheo usa los mismos nombres de modelo y de parametros en creep, relajacion y oscilacion,
+    asi que los parametros de un ajuste de creep sirven tal cual para calcular G'(w), G''(w) o G(t).
+    target: "saos" -> (G', G'') ; "relaxation" -> (G(t),) ; "creep" -> (J(t),)"""
+    if not PYRHEO:
+        raise ValueError("La prediccion necesita pyRheo instalado en el servidor.")
+    import importlib
+    mod = importlib.import_module({"saos": "pyRheo.oscillation_model", "relaxation": "pyRheo.relaxation_model",
+                                   "creep": "pyRheo.creep_model"}[target])
+    if model not in mod.MODEL_FUNCS:
+        raise ValueError(f"Modelo '{model}' no disponible para esta respuesta.")
+    names = mod.MODEL_PARAMS[model]
+    missing = [n for n in names if n not in params]
+    if missing:
+        raise ValueError("Faltan parametros: " + ", ".join(missing))
+    with np.errstate(all="ignore"):
+        y = np.asarray(mod.MODEL_FUNCS[model](*[float(params[n]) for n in names], x), float)
+    if target == "saos":
+        half = len(y) // 2
+        return y[:half], y[half:]
+    return (y,)
+
+
+def _fit_one(test, name, x, y, xd):
+    """Ajusta un modelo y devuelve el dict de resultado (solo tipos simples, para poder cruzar procesos)."""
+    if PYRHEO:
+        params, pred, chosen = _fit_pyrheo(test, name, x, y)
+    else:
+        params, pred = _fit_scipy(test, name, x, y)
+        chosen = name
+    yhat, yd = pred(x), pred(xd)
+    split = lambda v: [v[:len(v) // 2], v[len(v) // 2:]] if test == "saos" else [v]
+    return {
+        "requested": name, "model": chosen,
+        "params": {k: float(v) for k, v in params.items()},
+        "r2": _r2(y, yhat), "r2_log": _r2(np.log10(y), np.log10(np.abs(yhat) + 1e-300)),
+        "rss_w": float(np.sum(((y - yhat) / y) ** 2)),
+        "curve_x": xd.tolist(), "curve_y": [c.tolist() for c in split(yd)],
+    }
+
+
+def _worker(conn, test, name, x, y, xd):
+    import contextlib, io, warnings
+    warnings.filterwarnings("ignore")
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            conn.send(_fit_one(test, name, x, y, xd))
+    except Exception as e:  # noqa
+        conn.send({"requested": name, "error": str(e)})
+    finally:
+        conn.close()
+
+
+MODEL_TIMEOUT = 30   # segundos por modelo; los de 5-6 parametros pueden no terminar nunca
+TOTAL_BUDGET = 80    # segundos por solicitud (Render corta las peticiones largas)
+
+
 def run_fit(test, x, ys, models):
-    """x: array; ys: lista de arrays (1 para creep/relax/steady, 2 para SAOS: G', G'')."""
+    """x: array; ys: lista de arrays (1 para creep/relax/steady, 2 para SAOS: G', G'').
+    Cada modelo corre en su propio proceso con limite de tiempo: si uno no termina se corta y se avisa."""
+    import multiprocessing as mp
+    import time
     y = np.concatenate(ys)
     xd = np.logspace(np.log10(x.min()), np.log10(x.max()), 200)
-    out = []
+    out, t_start = [], time.time()
     for name in models:
-        try:
-            if PYRHEO:
-                params, pred, chosen = _fit_pyrheo(test, name, x, y)
-            else:
-                params, pred = _fit_scipy(test, name, x, y)
-                chosen = name
-            yhat, yd = pred(x), pred(xd)
-            split = lambda v: [v[:len(v) // 2], v[len(v) // 2:]] if test == "saos" else [v]
-            out.append({
-                "requested": name, "model": chosen,
-                "params": {k: float(v) for k, v in params.items()},
-                "r2": _r2(y, yhat), "r2_log": _r2(np.log10(y), np.log10(np.abs(yhat) + 1e-300)),
-                "rss_w": float(np.sum(((y - yhat) / y) ** 2)),
-                "curve_x": xd.tolist(), "curve_y": [c.tolist() for c in split(yd)],
-            })
-        except Exception as e:
-            out.append({"requested": name, "error": str(e)})
+        left = TOTAL_BUDGET - (time.time() - t_start)
+        if left < 3:
+            out.append({"requested": name, "error": "Omitido: se agotó el tiempo total de la solicitud. Ajusta menos modelos a la vez."})
+            continue
+        limit = min(MODEL_TIMEOUT, left)
+        parent, child = mp.Pipe(duplex=False)
+        p = mp.Process(target=_worker, args=(child, test, name, x, y, xd), daemon=True)
+        p.start()
+        child.close()
+        res = None
+        if parent.poll(limit):
+            try:
+                res = parent.recv()
+            except EOFError:
+                res = {"requested": name, "error": "El ajuste terminó sin resultado (posible falta de memoria)."}
+        else:
+            res = {"requested": name, "error": f"Tardó más de {int(limit)} s y se canceló. Prueba con un modelo con menos parámetros."}
+        if p.is_alive():
+            p.terminate()
+        p.join(2)
+        out.append(res)
     out.sort(key=lambda r: r.get("rss_w", float("inf")))
     return out
