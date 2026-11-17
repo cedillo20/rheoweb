@@ -9,8 +9,10 @@ import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from typing import Dict
 
-from engine import IMPORT_ERROR, PYRHEO, available_models, run_fit
+from engine import IMPORT_ERROR, PYRHEO, available_models, predict_response, run_fit
 
 MAX_BYTES = 10 * 1024 * 1024
 MAX_POINTS = 150  # puntos que se mandan al ajuste (muestreo logarítmico); los ensayos largos traen decenas de miles
@@ -291,11 +293,34 @@ async def tensile(file: UploadFile = File(...), sheet: str = Form(""), x_col: st
     return {"results": out, "format": "FIME" if tb["fime"] else ""}
 
 
+class PredictIn(BaseModel):
+    model: str
+    params: Dict[str, float]
+    target: str            # "saos" | "relaxation" | "creep"
+    x_min: float           # 10^x_min ... 10^x_max (rad/s para saos, s para las otras)
+    x_max: float
+    n: int = 200
+
+
+@app.post("/api/predict")
+def predict(q: PredictIn):
+    """Usa los parámetros de un modelo ya ajustado para calcular otra respuesta (p. ej. G′, G″ a partir de creep)."""
+    if q.target not in ("saos", "relaxation", "creep"):
+        raise HTTPException(400, "Respuesta no válida.")
+    if not (-12 <= q.x_min < q.x_max <= 12) or not (10 <= q.n <= 1000):
+        raise HTTPException(400, "Revisa el rango: mínimo < máximo, entre 10^-12 y 10^12, con 10 a 1000 puntos.")
+    x = np.logspace(q.x_min, q.x_max, q.n)
+    try:
+        ys = predict_response(q.model, q.params, q.target, x)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    clean = lambda v: [float(a) if np.isfinite(a) and a > 0 else None for a in v]
+    return {"x": x.tolist(), "ys": [clean(y) for y in ys], "target": q.target, "model": q.model}
+
+
 @app.get("/")
 def index():
     return FileResponse(FRONT / "index.html")
 
-
-app.mount("/static", StaticFiles(directory=FRONT), name="static")
 
 app.mount("/static", StaticFiles(directory=FRONT), name="static")
