@@ -16,8 +16,9 @@ IMPLEMENTACION = {
                       "se considera porción lineal si abarca al menos 0.25 % de deformación",
     "cedencia": "primer punto donde el esfuerzo (promedio móvil de 9 puntos) deja de aumentar y no se supera "
                 "en el siguiente 1 % de deformación",
-    "ruptura": "último punto antes de la mayor caída de esfuerzo después del máximo; si ninguna caída supera "
-               "10 % del esfuerzo máximo, se toma el último punto registrado",
+    "ruptura": "último punto antes de la mayor caída de esfuerzo después del máximo; si ninguna caída entre puntos "
+               "consecutivos supera 10 % del esfuerzo máximo, se considera que el registro no incluye la ruptura y no se "
+               "reportan propiedades a la ruptura ni tenacidad",
     "tenacidad": "integral trapezoidal del esfuerzo nominal sobre la deformación (en fracción) desde el cero "
                  "corregido hasta la ruptura",
 }
@@ -61,13 +62,18 @@ def analyze(strain_pct, stress, secant_pct=1.0, time=None, force=None, disp=None
     # --- Ruptura (10.6, A2.8.1, A2.17.1): momento de la ruptura
     drops = np.diff(s[imax:]) if imax < len(s) - 1 else np.array([0.0])
     jd = int(np.argmin(drops)) if len(drops) else 0
-    r = imax + jd if len(drops) and -drops[jd] >= 0.10 * smax else len(s) - 1
+    rotura = bool(len(drops) and -drops[jd] >= 0.10 * smax)
+    r = imax + jd if rotura else len(s) - 1
 
     # --- Tangente de pendiente máxima en la región inicial (11.4, A1.2, A1.3)
     lim = np.where(s[: imax + 1] <= 0.25 * smax)[0]
     n_ini = int(lim[-1]) + 1 if len(lim) else imax + 1
     step = np.median(np.diff(e[: max(n_ini, 3)])) if n_ini > 2 else np.nan
+    if n_ini < 5:
+        raise ValueError("La región inicial (esfuerzo <= 25 % del máximo) tiene menos de 5 puntos; no se puede trazar la "
+                         "tangente del módulo. Revisa la frecuencia de muestreo o las unidades de deformación.")
     w = max(5, int(np.ceil(0.25 / step)) if np.isfinite(step) and step > 0 else 5)
+    w = min(w, n_ini)  # la ventana nunca puede ser mayor que la región inicial
     best = None
     for i in range(0, max(1, n_ini - w + 1)):
         seg = slice(i, i + w)
@@ -125,6 +131,8 @@ def analyze(strain_pct, stress, secant_pct=1.0, time=None, force=None, disp=None
     # --- Resistencia a la tensión (11.2, A2.18)
     if yi is not None and s[yi] >= smax * 0.999:
         designacion = "en la cedencia"
+    elif not rotura:
+        designacion = "máximo del registro (no se registró la ruptura)"
     elif s[r] >= smax * 0.999:
         designacion = "a la ruptura"
     else:
@@ -134,7 +142,7 @@ def analyze(strain_pct, stress, secant_pct=1.0, time=None, force=None, disp=None
     seg = slice(0, r + 1)
     e_t = np.clip(ec[seg], 0, None) / 100.0
     s_t = np.clip(s[seg], 0, None)
-    tenacidad = float(np.sum((s_t[1:] + s_t[:-1]) * np.diff(e_t)) / 2)  # regla del trapecio (np.trapz no existe en NumPy 2.x)
+    tenacidad = float(np.sum((s_t[1:] + s_t[:-1]) * np.diff(e_t)) / 2) if rotura else None  # trapecio; sin ruptura no aplica
 
     out = {
         "n_puntos": int(len(e)),
@@ -144,7 +152,9 @@ def analyze(strain_pct, stress, secant_pct=1.0, time=None, force=None, disp=None
         "designacion": designacion,
         "deformacion_en_maximo": float(ec[imax]),
         "cedencia": cedencia,
-        "ruptura": {"esfuerzo": float(s[r]), "deformacion": float(ec[r]), "indice": int(r)},
+        "ruptura": ({"esfuerzo": float(s[r]), "deformacion": float(ec[r]), "indice": int(r), "detectada": True} if rotura else
+                    {"esfuerzo": None, "deformacion": None, "indice": None, "detectada": False,
+                     "fin_del_registro": {"esfuerzo": float(s[r]), "deformacion": float(ec[r])}}),
         "tenacidad_MJ_m3": tenacidad,
     }
     if t is not None:
@@ -197,6 +207,11 @@ def checks(results):
     n = len(results)
     c.append({"clausula": "7.1", "estado": "ok" if n >= 5 else "aviso",
               "texto": f"Se ensayaron {n} probetas." + ("" if n >= 5 else " D638 pide al menos 5 por muestra en materiales isotrópicos.")})
+    sin = [r.get("sample", "") for r in results if not r["ruptura"]["detectada"]]
+    if sin:
+        c.append({"clausula": "10.6", "estado": "aviso",
+                  "texto": f"No se registró la ruptura en {', '.join(sin)}: la curva termina sin caída de esfuerzo. No se reportan "
+                           "esfuerzo ni elongación a la ruptura ni tenacidad para esas probetas."})
     c.append({"clausula": "7.3", "estado": "info",
               "texto": "Descarte las probetas que rompan en un defecto o fuera de la sección angosta y repita el ensayo. "
                        "Esto no se puede verificar con los datos: revise cada probeta."})
