@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Dict
 
+import tensile as tensile_d638
 from engine import IMPORT_ERROR, PYRHEO, available_models, fit_settings, predict_response, run_fit
 
 MAX_BYTES = 10 * 1024 * 1024
@@ -255,43 +256,45 @@ async def fit(file: UploadFile = File(...), test: str = Form(...), x_col: str = 
 
 
 @app.post("/api/tensile")
-async def tensile(file: UploadFile = File(...), sheet: str = Form(""), x_col: str = Form(""), y_col: str = Form("")):
-    """Ensayo de tensión: curvas esfuerzo-deformación y resumen. No usa pyRheo."""
+async def tensile(file: UploadFile = File(...), sheet: str = Form(""), x_col: str = Form(""), y_col: str = Form(""),
+                  secant: float = Form(1.0)):
+    """Ensayo de tensión analizado según ASTM D638-14 (ver tensile.py). No usa pyRheo."""
+    if not (0 < secant <= 100):
+        raise HTTPException(400, "La deformación designada para el módulo secante debe estar entre 0 y 100 %.")
     tb = load_table(file, await file.read(), sheet, "")
     series = {}
     if tb["fime"]:
         for label, d in tb["all"].items():
             m = fime_meta(d)
-            series[label] = pd.DataFrame({"e": d[m["e"]], "s": d[m["s"]]})
+            col = lambda p: next((c for c in d.columns if _norm(c).startswith(p)), None)
+            fcol, xcol = col("fuerza"), col("desplazamiento")
+            dd = d.dropna(subset=[m["e"], m["s"]])
+            series[label] = dict(strain_pct=dd[m["e"]], stress=dd[m["s"]], time=dd[m["t"]],
+                                 force=dd[fcol] if fcol else None, disp=dd[xcol] if xcol else None)
     else:
         try:
-            series["M1"] = pd.DataFrame({"e": tb["df"][x_col], "s": tb["df"][y_col]})
+            dd = tb["df"][[x_col, y_col]].apply(pd.to_numeric, errors="coerce").dropna()
         except KeyError:
             raise HTTPException(400, "Elige las columnas de deformación y esfuerzo.")
-    out = []
-    for label, d in series.items():
-        d = d.apply(pd.to_numeric, errors="coerce").dropna()
-        if len(d) < 20:
+        series["M1"] = dict(strain_pct=dd[x_col], stress=dd[y_col])
+    out, errors = [], []
+    for label, kw in series.items():
+        kw = {k: (None if v is None else pd.to_numeric(v, errors="coerce").to_numpy(float)) for k, v in kw.items()}
+        try:
+            r = tensile_d638.analyze(secant_pct=secant, **kw)
+        except Exception as e:
+            errors.append({"sample": label, "error": str(e)})
             continue
-        ev, sv = d["e"].to_numpy(float), d["s"].to_numpy(float)
-        imax = int(np.argmax(sv))
-        smax = float(sv[imax])
-        below = np.where(sv[imax:] < 0.5 * smax)[0]
-        ebreak = float(ev[imax + below[0]]) if len(below) else None
-        # módulo: pendiente máxima (regresión en ventanas deslizantes) antes del esfuerzo máximo, deformación en fracción
-        w = max(10, (imax + 1) // 30)
-        best = None
-        for i in range(0, max(1, imax + 1 - w), max(1, w // 2)):
-            seg_e, seg_s = ev[i:i + w] / 100.0, sv[i:i + w]
-            if len(seg_e) >= 3 and np.ptp(seg_e) > 0:
-                k = float(np.polyfit(seg_e, seg_s, 1)[0])
-                best = k if best is None or k > best else best
-        step = max(1, int(np.ceil(len(ev) / 600)))
-        out.append({"sample": label, "strain": ev[::step].tolist(), "stress": sv[::step].tolist(),
-                    "E": best, "sigma_max": smax, "eps_at_sigma_max": float(ev[imax]), "eps_break": ebreak})
+        # claves cortas usadas por la gráfica, el CSV y el código Python
+        r.update(sample=label, strain=r["deformacion"], stress=r["esfuerzo"], E=r["modulo"]["valor"],
+                 sigma_max=r["resistencia_tension"], eps_break=r["ruptura"]["deformacion"])
+        out.append(r)
     if not out:
-        raise HTTPException(400, "No encontré datos suficientes de esfuerzo y deformación.")
-    return {"results": out, "format": "FIME" if tb["fime"] else ""}
+        raise HTTPException(400, "No encontré datos suficientes de esfuerzo y deformación." +
+                            (" " + "; ".join(f"{e['sample']}: {e['error']}" for e in errors) if errors else ""))
+    return {"results": out, "errors": errors, "format": "FIME" if tb["fime"] else "", "norma": tensile_d638.NORMA,
+            "resumen": tensile_d638.summarize(out), "verificaciones": tensile_d638.checks(out),
+            "implementacion": tensile_d638.IMPLEMENTACION, "secante_designada": secant}
 
 
 class PredictIn(BaseModel):
