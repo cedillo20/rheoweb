@@ -60,6 +60,7 @@ th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-
 .hrow{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}.hrow h2{margin:0}
 .dl{display:flex;align-items:center;gap:8px;font-size:13.5px}.dl span{font-weight:600;color:var(--ink)}
 button.sm{padding:5px 14px;font-size:13.5px}
+.js-plotly-plot .legend .traces, .js-plotly-plot .legendtoggle{cursor:pointer!important}
 small{color:var(--mute)}
 .tabs{display:flex;gap:4px;margin-top:16px}
 .tabs button{background:transparent;border:0;border-bottom:3px solid transparent;border-radius:0;color:#cfe5d3;padding:10px 14px}
@@ -140,7 +141,7 @@ small{color:var(--mute)}
       </div>
       <div id="plot" style="height:430px"></div>
       <div id="resw" hidden>
-        <small><b>Residuos relativos:</b> (dato − modelo) / dato, en cada punto ajustado. Puntos repartidos al azar alrededor de 0 indican buen ajuste; una tendencia u onda indica que el modelo no reproduce la forma de la curva. Haz clic en un modelo de la leyenda para ocultarlo en ambas gráficas.</small>
+        <small><b>Residuos relativos:</b> (dato − modelo) / dato, en cada punto ajustado. Puntos repartidos al azar alrededor de 0 indican buen ajuste; una tendencia u onda indica que el modelo no reproduce la forma de la curva. Ocultar un modelo en la leyenda de arriba también lo oculta aquí.</small>
         <div id="resplot" style="height:240px"></div>
       </div>
       <div class="row">
@@ -224,6 +225,9 @@ const LABELS = {relaxation:["Columna de tiempo","Columna G(t)"],creep:["Columna 
   saos:["Columna ω","Columna G′"],steady:["Columna γ̇","Columna η"],tension:["Columna de deformación","Columna de esfuerzo"]};
 const AXES = {relaxation:["t [s]","G(t) [Pa]"],creep:["t [s]","J(t) [1/Pa]"],saos:["ω [rad/s]","G′, G″ [Pa]"],steady:["γ̇ [1/s]","η [Pa·s]"],tension:["Deformación [%]","Esfuerzo [MPa]"]};
 const COLORS = ["#0b6b3a","#c2571a","#1f5f99","#7a3fa0","#b08a00","#555"];
+// Leyenda con aspecto de panel de botones y la instrucción visible (en las imágenes descargadas se quita)
+const LEG = {orientation:"h", y:-0.24, bgcolor:"#f3f8f4", bordercolor:"#b9cfbf", borderwidth:1, font:{size:12.5},
+  title:{text:"<b>Clic</b> en un elemento para ocultarlo o mostrarlo · <b>doble clic</b> para ver solo ese", side:"top", font:{size:12, color:"#5d6b63"}}};
 
 // Nombres para mostrar (el valor interno que usa pyRheo no cambia)
 const LBL = {auto:"Automático (sugerido por pyRheo)", Maxwell:"Maxwell", SpringPot:"Springpot",
@@ -323,7 +327,7 @@ async function runTensile() {
         marker:{symbol:"x", size:10, color:c}, hovertemplate:"Ruptura<br>%{y:.3g} MPa · %{x:.3g} %<extra></extra>"});
     });
     Plotly.newPlot("plot", traces, {xaxis:{title:xlab, gridcolor:"#d9e1e7"}, yaxis:{title:AXES.tension[1], gridcolor:"#d9e1e7"},
-      paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:"#17222d"}, margin:{t:10, r:10}, legend:{orientation:"h", y:-0.22}}, {responsive:true});
+      paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:"#17222d"}, margin:{t:10, r:10}, legend:LEG}, {responsive:true});
     // 11.2 y 11.4: tres cifras significativas; 11.7: desviación estándar con dos
     // toPrecision conserva los ceros finales (2.90, no 2.9); en notación científica solo si el número es muy grande o muy pequeño
     const sig = n => v => (v === null || v === undefined || !isFinite(v)) ? "—" : (Math.abs(v) >= 1e5 || (v !== 0 && Math.abs(v) < 1e-3)) ? Number(v).toExponential(n - 1) : Number(v).toPrecision(n);
@@ -385,7 +389,7 @@ function show(d) {
   const ax = d.axes || AXES[d.test];
   Plotly.newPlot("plot", traces, {xaxis:{type:"log", title:ax[0], color:fg, gridcolor:dark ? "#2b3946" : "#d9e1e7"},
     yaxis:{type:"log", title:ax[1], color:fg, gridcolor:dark ? "#2b3946" : "#d9e1e7"},
-    paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:fg}, margin:{t:10, r:10}, legend:{orientation:"h", y:-0.22}}, {responsive:true});
+    paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:fg}, margin:{t:10, r:10}, legend:LEG}, {responsive:true});
 
   // Residuos: mismos colores que las curvas; en SAOS, G′ con línea continua y G″ discontinua
   const rtr = [];
@@ -431,7 +435,8 @@ function plotTitle() {
 // Con residuos visibles, la imagen lleva la gráfica de residuos debajo de la principal (mismo eje x)
 const plotImage = async format => {
   const gd = $("plot"), title = {text:esc(plotTitle()), font:{size:20, color:"#17222d"}, x:0.5, xanchor:"center"};
-  const base = {paper_bgcolor:"#ffffff", plot_bgcolor:"#ffffff", font:gd.layout.font, legend:gd.layout.legend};
+  const base = {paper_bgcolor:"#ffffff", plot_bgcolor:"#ffffff", font:gd.layout.font,
+    legend:{...gd.layout.legend, title:{text:""}, bgcolor:"rgba(0,0,0,0)", borderwidth:0}};
   let data = gd.data, layout = {...gd.layout, ...base, title, margin:{...gd.layout.margin, t:70}}, height = 760;
   const rp = $("resplot");
   if (!$("resw").hidden && rp.data) {
@@ -439,7 +444,7 @@ const plotImage = async format => {
     data = [...gd.data, ...rp.data.map(t => ({...t, xaxis:"x", yaxis:"y2", showlegend:false}))];
     layout = {...base, title, margin:{t:70, r:20, l:80, b:60}, xaxis:{...mx, anchor:"y2"},
       yaxis:{...gd.layout.yaxis, domain:[0.36, 1]}, yaxis2:{...ry, domain:[0, 0.27], anchor:"x"},
-      legend:{orientation:"h", x:0, y:1.0, yanchor:"bottom"}};
+      legend:{orientation:"h", x:0, y:1.0, yanchor:"bottom", title:{text:""}, borderwidth:0, bgcolor:"rgba(0,0,0,0)"}};
     height = 980;
   }
   return (await fetch(await Plotly.toImage({data, layout}, {format, width:1200, height}))).blob();
@@ -610,7 +615,7 @@ $("pred").onclick = async () => {
     Plotly.newPlot("predplot", traces, {xaxis:{type:"log", title:t === "saos" ? "ω [rad/s]" : "t [s]", color:fg, gridcolor:grid},
       yaxis:{type:"log", title:ytitle, color:fg, gridcolor:grid},
       yaxis2:{type:"log", title:"tan δ", overlaying:"y", side:"right", color:fg, showgrid:false},
-      paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:fg}, margin:{t:10, r:t === "saos" ? 60 : 10}, legend:{orientation:"h", y:-0.22}}, {responsive:true});
+      paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:fg}, margin:{t:10, r:t === "saos" ? 60 : 10}, legend:LEG}, {responsive:true});
     $("predh").textContent = `Predicción: ${PT[t]}`;
     $("prednote").textContent = `Modelo ${pretty(fit.model)} ajustado a ${PT[last.test].split(" — ")[1]} (` +
       Object.entries(fit.params).map(([k, v]) => `${k} = ${fmt(v)}`).join(", ") +
