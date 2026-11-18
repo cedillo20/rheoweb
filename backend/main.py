@@ -272,10 +272,16 @@ async def fit(file: UploadFile = File(...), test: str = Form(...), x_col: str = 
 
 @app.post("/api/tensile")
 async def tensile(file: UploadFile = File(...), sheet: str = Form(""), x_col: str = Form(""), y_col: str = Form(""),
-                  secant: float = Form(1.0)):
-    """Ensayo de tensión analizado según ASTM D638-14 (ver tensile.py). No usa pyRheo."""
+                  secant: float = Form(1.0), strain_unit: str = Form("pct"), stress_unit: str = Form("MPa")):
+    """Ensayo de tensión analizado según ASTM D638-14 (ver tensile.py). No usa pyRheo.
+    Internamente todo se calcula con deformación en % y esfuerzo en MPa; los archivos FIME ya vienen así y en
+    archivos genéricos se convierten según las unidades que indique el usuario."""
     if not (0 < secant <= 100):
         raise HTTPException(400, "La deformación designada para el módulo secante debe estar entre 0 y 100 %.")
+    STRAIN = {"pct": 1.0, "frac": 100.0}
+    STRESS = {"MPa": 1.0, "kPa": 1e-3, "Pa": 1e-6}
+    if strain_unit not in STRAIN or stress_unit not in STRESS:
+        raise HTTPException(400, "Unidades no válidas.")
     tb = load_table(file, await file.read(), sheet, "")
     series = {}
     if tb["fime"]:
@@ -291,7 +297,7 @@ async def tensile(file: UploadFile = File(...), sheet: str = Form(""), x_col: st
             dd = tb["df"][[x_col, y_col]].apply(pd.to_numeric, errors="coerce").dropna()
         except KeyError:
             raise HTTPException(400, "Elige las columnas de deformación y esfuerzo.")
-        series["M1"] = dict(strain_pct=dd[x_col], stress=dd[y_col])
+        series["M1"] = dict(strain_pct=dd[x_col] * STRAIN[strain_unit], stress=dd[y_col] * STRESS[stress_unit])
     out, errors = [], []
     for label, kw in series.items():
         kw = {k: (None if v is None else pd.to_numeric(v, errors="coerce").to_numpy(float)) for k, v in kw.items()}
@@ -307,9 +313,18 @@ async def tensile(file: UploadFile = File(...), sheet: str = Form(""), x_col: st
     if not out:
         raise HTTPException(400, "No encontré datos suficientes de esfuerzo y deformación." +
                             (" " + "; ".join(f"{e['sample']}: {e['error']}" for e in errors) if errors else ""))
+    checks = tensile_d638.checks(out)
+    if not tb["fime"]:
+        emax = max(max(r["deformacion"]) for r in out)
+        checks.insert(0, {"clausula": "Unidades", "estado": "aviso" if (strain_unit == "pct" and emax < 1) else "info",
+                          "texto": f"Unidades de entrada: deformación en {'%' if strain_unit == 'pct' else 'fracción (mm/mm)'}, esfuerzo en "
+                                   f"{stress_unit}; los resultados se reportan en % y MPa." +
+                                   (f" La deformación máxima es {emax:.3g} %: si tus datos están en mm/mm, elige «fracción»."
+                                    if strain_unit == "pct" and emax < 1 else "")})
     return {"results": out, "errors": errors, "format": "FIME" if tb["fime"] else "", "norma": tensile_d638.NORMA,
-            "resumen": tensile_d638.summarize(out), "verificaciones": tensile_d638.checks(out),
-            "implementacion": tensile_d638.IMPLEMENTACION, "secante_designada": secant}
+            "resumen": tensile_d638.summarize(out), "verificaciones": checks,
+            "implementacion": tensile_d638.IMPLEMENTACION, "secante_designada": secant,
+            "unidades_entrada": None if tb["fime"] else {"deformacion": strain_unit, "esfuerzo": stress_unit}}
 
 
 class PredictIn(BaseModel):
