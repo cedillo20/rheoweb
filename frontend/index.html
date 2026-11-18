@@ -221,7 +221,7 @@ small{color:var(--mute)}
 
 <script>
 const $ = id => document.getElementById(id);
-const LABELS = {relaxation:["Columna de tiempo","Columna G(t)"],creep:["Columna de tiempo","Columna J(t)"],
+const LABELS = {relaxation:["Columna de tiempo","Columna G(t) o E(t)"],creep:["Columna de tiempo","Columna J(t) o D(t)"],
   saos:["Columna ω","Columna G′"],steady:["Columna γ̇","Columna η"],tension:["Columna de deformación","Columna de esfuerzo"]};
 const AXES = {relaxation:["t [s]","G(t) [Pa]"],creep:["t [s]","J(t) [1/Pa]"],saos:["ω [rad/s]","G′, G″ [Pa]"],steady:["γ̇ [1/s]","η [Pa·s]"],tension:["Deformación [%]","Esfuerzo [MPa]"]};
 const COLORS = ["#0b6b3a","#c2571a","#1f5f99","#7a3fa0","#b08a00","#555"];
@@ -381,8 +381,8 @@ function show(d) {
   $("mnote").innerHTML = "R² lineal puede ser engañoso con datos que abarcan varias décadas; R² log se calcula sobre log₁₀ de los datos. RSS<sub>w</sub> es el residual ponderado que pyRheo minimiza. Cada ajuste usa una semilla aleatoria fija, así que el mismo archivo da siempre el mismo resultado; si el ajuste sale pobre (R² log &lt; 0.95) se reintenta con otras semillas y se conserva el mejor. " +
     "El ajuste de modelos fraccionarios es un análisis complementario de la literatura (Miranda-Valdez et al., 2025); no es un procedimiento ASTM.";
   const ok = d.results.filter(r => !r.error), traces = [];
-  const names = d.test === "saos" ? ["G′", "G″"] : [AXES[d.test][1].split(" ")[0]];
-  d.ys.forEach((y, i) => traces.push({x:d.x, y, mode:"markers", name:"Datos " + names[i], marker:{size:7, color:i ? "#8a97a3" : "#17222d", symbol:i ? "square" : "circle", opacity:.75}}));
+  const names = d.test === "saos" ? (d.modo === "tension" ? ["E′", "E″"] : ["G′", "G″"]) : [d.modo === "tension" ? d.axes[1].split(" ")[0] : ""];
+  d.ys.forEach((y, i) => traces.push({x:d.x, y, mode:"markers", name:"Datos" + (names[i] ? " " + names[i] : ""), marker:{size:7, color:i ? "#8a97a3" : "#17222d", symbol:i ? "square" : "circle", opacity:.75}}));
   ok.forEach((r, k) => r.curve_y.forEach((cy, i) => traces.push({x:r.curve_x, y:cy, mode:"lines", name:`${pretty(r.model)}${d.test === "saos" ? " " + names[i] : ""}`,
     line:{color:COLORS[k % COLORS.length], width:2.2, dash:i ? "dash" : "solid"}})));
   const dark = false, fg = dark ? "#e6edf2" : "#17222d";
@@ -567,7 +567,9 @@ function tab(which) {
 
 // ---------- Predicción con el modelo ajustado ----------
 // pyRheo usa los mismos parámetros en creep, relajación y oscilación: el servidor evalúa el modelo en la otra respuesta.
-const PT = {saos:"G′(ω) y G″(ω) — oscilación", relaxation:"G(t) — relajación", creep:"J(t) — creep"};
+const PTL = tens => tens ? {saos:"E′(ω) y E″(ω) — oscilación", relaxation:"E(t) — relajación", creep:"D(t) — creep"}
+                         : {saos:"G′(ω) y G″(ω) — oscilación", relaxation:"G(t) — relajación", creep:"J(t) — creep"};
+let PT = PTL(false);
 let predFor = null;
 const predFits = () => (last && last.results && PT[last.test]) ? last.results.filter(r => !r.error) : [];
 function predRange() {
@@ -582,7 +584,7 @@ function predSetup() {
   const fits = predFits();
   $("pnone").hidden = fits.length > 0; $("pform").hidden = !fits.length;
   if (!fits.length || predFor === last) return;
-  predFor = last; $("predsec").hidden = true; $("pmsg").innerHTML = "";
+  predFor = last; $("predsec").hidden = true; $("pmsg").innerHTML = ""; PT = PTL(last.modo === "tension");
   $("pmodel").innerHTML = fits.map((r, i) => `<option value="${i}">${esc(pretty(r.model))} (R² log ${fmt(r.r2_log)})</option>`).join("");
   $("ptarget").innerHTML = Object.keys(PT).filter(k => k !== last.test).map(k => `<option value="${k}">${PT[k]}</option>`).join("");
   predRange();
@@ -598,14 +600,16 @@ $("pred").onclick = async () => {
     const r = await fetch("/api/predict", {method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify({model:fit.model, params:fit.params, target:t, x_min:x0, x_max:x1})}), d = await r.json();
     if (!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : "No se pudo calcular la predicción.");
-    const u = last.axes ? "MPa" : "Pa", fg = "#17222d", grid = "#d9e1e7", traces = [];
+    // unidades: MPa en archivos FIME; en archivos genéricos no se suponen (son las de los datos)
+    const tens = last.modo === "tension", U = s => tens ? ` [${s}]` : " (unidades de tus datos)", fg = "#17222d", grid = "#d9e1e7", traces = [];
+    const [n1, n2, nR, nC] = tens ? ["E′", "E″", "E(t)", "D(t)"] : ["G′", "G″", "G(t)", "J(t)"];
     const line = (y, name, color, dash, extra) => traces.push({x:d.x, y, mode:"lines", name, line:{color, width:2.4, dash}, ...extra});
     let ytitle;
     if (t === "saos") {
-      line(d.ys[0], "G′", COLORS[0], "solid"); line(d.ys[1], "G″", COLORS[1], "dash");
+      line(d.ys[0], n1, COLORS[0], "solid"); line(d.ys[1], n2, COLORS[1], "dash");
       line(d.ys[0].map((g, i) => g && d.ys[1][i] ? d.ys[1][i] / g : null), "tan δ (eje derecho)", COLORS[2], "dot", {yaxis:"y2"});
-      ytitle = `G′, G″ [${u}]`;
-    } else { line(d.ys[0], t === "creep" ? "J(t)" : "G(t)", COLORS[0], "solid"); ytitle = t === "creep" ? `J(t) [1/${u}]` : `G(t) [${u}]`; }
+      ytitle = `${n1}, ${n2}` + U("MPa");
+    } else { line(d.ys[0], t === "creep" ? nC : nR, COLORS[0], "solid"); ytitle = (t === "creep" ? nC + U("1/MPa") : nR + U("MPa")); }
     // ventana que cubre el ensayo (ω ≈ 1/t): fuera de ella la curva es extrapolación
     const flip = (t === "saos") !== (last.test === "saos"), lo = Math.min(...last.x), hi = Math.max(...last.x);
     const win = flip ? [1 / hi, 1 / lo] : [lo, hi], vals = d.ys.slice(0, t === "saos" ? 2 : 1).flat().filter(v => v), ymin = Math.min(...vals), ymax = Math.max(...vals);
