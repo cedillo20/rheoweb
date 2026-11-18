@@ -12,7 +12,9 @@
 :root{color-scheme:light;--bg:#ffffff;--panel:#fafcfb;--ink:#1c2a22;--mute:#5d6b63;--line:#d8e0da;--acc:#0b6b3a;--acc2:#c2571a;--hdr:#0b5a33;--hdr2:#8cc63f}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
-body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 "Public Sans",system-ui,sans-serif}
+/* fondo de los lados: papel milimétrico verde tenue, para que la hoja central destaque */
+body{margin:0;color:var(--ink);font:15px/1.55 "Public Sans",system-ui,sans-serif;background-color:#e6eee8;
+  background-image:linear-gradient(rgba(11,90,51,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(11,90,51,.07) 1px,transparent 1px);background-size:28px 28px}
 header{position:relative;overflow:hidden;background:var(--hdr);color:#fff;border-bottom:4px solid var(--hdr2)}
 .in{max-width:1180px;margin:auto;padding:0 24px}
 header .in{position:relative;padding-top:20px}
@@ -29,14 +31,14 @@ header p{margin:0;color:#d7ead9;max-width:62ch;font-size:14.5px}
 .chip{font-size:12.5px;line-height:1;padding:7px 11px;border:1px solid rgba(255,255,255,.3);border-radius:999px;color:#e3f1e5;text-decoration:none;background:var(--hdr)}
 a.chip:hover,a.chip:focus-visible{border-color:#fff;color:#fff}
 @media(max-width:860px){.hdeco{display:none}.chips{margin-left:0}}
-footer{margin-top:20px;background:#f1f5f2;border-top:1px solid var(--line);color:var(--mute);font-size:13px}
+footer{margin-top:0;background:#f1f5f2;border-top:1px solid var(--line);color:var(--mute);font-size:13px}
 footer .in{padding-top:18px;padding-bottom:22px}
 footer p{margin:0 0 6px}
 footer strong{color:var(--ink)}
 footer a{color:var(--acc)}
-main{max-width:1180px;margin:auto;padding:16px 24px 60px;display:grid;grid-template-columns:340px 1fr;gap:20px;align-items:start}
+main{max-width:1180px;margin:0 auto;padding:22px 24px 60px;background:var(--bg);box-shadow:0 0 0 1px var(--line),0 14px 40px rgba(20,60,35,.16);display:grid;grid-template-columns:340px 1fr;gap:20px;align-items:start}
 main>*{min-width:0}
-@media(max-width:860px){main{grid-template-columns:1fr}}
+@media(max-width:860px){main{grid-template-columns:1fr;box-shadow:none}}
 section{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px;box-shadow:0 1px 2px rgba(20,60,35,.06)}
 h2{font:600 17px "Newsreader",Georgia,serif;margin:0 0 10px}
 label{display:block;font-weight:500;margin:12px 0 4px}
@@ -123,6 +125,8 @@ small{color:var(--mute)}
     <label id="mlab">Modelos</label>
     <div class="models" id="models"></div>
     <label id="trw" style="display:flex;gap:8px;font-weight:400;margin-top:12px" hidden><input type="checkbox" id="trim" checked> Usar solo la parte útil (quita la rampa de carga y reinicia el tiempo)</label>
+    <div id="secw" hidden><label for="secant">Deformación designada para módulo secante [%]</label><input type="number" id="secant" value="1" min="0.01" max="100" step="any">
+      <small>Solo se usa si una probeta no tiene porción lineal (ASTM D638, 11.5). Debe reportarse junto con el módulo.</small></div>
     <div class="row"><button id="run" disabled>Ajustar</button></div>
     <div id="msg"></div>
   </section>
@@ -141,10 +145,10 @@ small{color:var(--mute)}
         <button class="ghost" id="pyc">Descargar código (Python)</button>
         <button id="zip" title="PNG, SVG, JSON, CSV y código Python en un solo archivo">Descargar todo (ZIP)</button>
       </div>
-      <h2 style="margin-top:22px">Comparación de modelos</h2>
+      <h2 style="margin-top:22px" id="mh">Comparación de modelos</h2>
       <div class="scroll" id="metrics"></div>
-      <small>R² lineal puede ser engañoso con datos que abarcan varias décadas; R² log se calcula sobre log₁₀ de los datos. RSS<sub>w</sub> es el residual ponderado que pyRheo minimiza.</small>
-      <h2 style="margin-top:22px">Parámetros</h2>
+      <small id="mnote">R² lineal puede ser engañoso con datos que abarcan varias décadas; R² log se calcula sobre log₁₀ de los datos. RSS<sub>w</sub> es el residual ponderado que pyRheo minimiza.</small>
+      <h2 style="margin-top:22px" id="ph">Parámetros</h2>
       <div class="scroll" id="params"></div>
     </section>
   </div>
@@ -241,7 +245,7 @@ function renderModels() {
   $("run").textContent = t === "tension" ? "Analizar" : "Ajustar";
   $("models").innerHTML = list.map((m, i) => `<label><input type="checkbox" value="${m}" ${i < 2 ? "checked" : ""}> ${esc(pretty(m))}</label>`).join("");
   $("xl").textContent = LABELS[t][0]; $("yl").textContent = LABELS[t][1];
-  $("y2w").hidden = t !== "saos"; $("trw").hidden = !(t === "relaxation" || t === "creep");
+  $("y2w").hidden = t !== "saos"; $("trw").hidden = !(t === "relaxation" || t === "creep"); $("secw").hidden = t !== "tension";
   guessCols();
 }
 $("test").onchange = renderModels;
@@ -293,18 +297,52 @@ async function load(f, sheet, sample) {
 async function runTensile() {
   const fd = new FormData();
   fd.append("file", file); fd.append("sheet", $("sheet").value); fd.append("x_col", $("xc").value); fd.append("y_col", $("yc").value);
+  const sec = parseFloat($("secant").value);
+  if (!(sec > 0 && sec <= 100)) { note("La deformación designada para el módulo secante debe estar entre 0 y 100 %.", "err"); return; }
+  fd.append("secant", sec);
   $("run").disabled = true; $("run").textContent = "Analizando…"; note("");
   try {
     const r = await fetch("/api/tensile", {method:"POST", body:fd}), d = await r.json();
     if (!r.ok) throw new Error(d.detail || "Error en el análisis.");
-    last = {test:"tension", tensile:d.results, meta:{archivo:file.name, hoja:$("sheet").value, formato:d.format || ""}};
+    // D638 10.3 Nota 11 y 11.3.2: si la deformación viene de la separación de mordazas, es deformación nominal
+    const nominal = d.verificaciones.some(c => c.clausula.startsWith("10.3") && c.estado === "aviso");
+    const xlab = nominal ? "Deformación nominal [%]" : "Deformación [%]";
+    last = {test:"tension", tensile:d.results, d638:d, xlabel:xlab, meta:{archivo:file.name, hoja:$("sheet").value, formato:d.format || "", secante_designada:sec}};
     $("res").hidden = false;
-    const traces = d.results.map((s, k) => ({x:s.strain, y:s.stress, mode:"lines", name:s.sample, line:{color:COLORS[k % COLORS.length], width:2.2}}));
-    Plotly.newPlot("plot", traces, {xaxis:{title:AXES.tension[0], gridcolor:"#d9e1e7"}, yaxis:{title:AXES.tension[1], gridcolor:"#d9e1e7"},
+    const traces = [];
+    d.results.forEach((s, k) => {
+      const c = COLORS[k % COLORS.length];
+      traces.push({x:s.strain, y:s.stress, mode:"lines", name:s.sample, legendgroup:s.sample, line:{color:c, width:2.2}});
+      if (s.cedencia) traces.push({x:[s.cedencia.deformacion], y:[s.cedencia.esfuerzo], mode:"markers", name:`${s.sample} · cedencia`, legendgroup:s.sample, showlegend:false,
+        marker:{symbol:"diamond", size:10, color:c, line:{color:"#fff", width:1}}, hovertemplate:"Cedencia (A2.22)<br>%{y:.3g} MPa · %{x:.3g} %<extra></extra>"});
+      traces.push({x:[s.ruptura.deformacion], y:[s.ruptura.esfuerzo], mode:"markers", name:`${s.sample} · ruptura`, legendgroup:s.sample, showlegend:false,
+        marker:{symbol:"x", size:10, color:c}, hovertemplate:"Ruptura<br>%{y:.3g} MPa · %{x:.3g} %<extra></extra>"});
+    });
+    Plotly.newPlot("plot", traces, {xaxis:{title:xlab, gridcolor:"#d9e1e7"}, yaxis:{title:AXES.tension[1], gridcolor:"#d9e1e7"},
       paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:"#17222d"}, margin:{t:10, r:10}, legend:{orientation:"h", y:-0.22}}, {responsive:true});
-    $("metrics").innerHTML = `<table><tr><th>Muestra</th><th>E [MPa]</th><th>σ máx [MPa]</th><th>ε en σ máx [%]</th><th>ε a ruptura [%]</th></tr>` +
-      d.results.map(s => `<tr><td>${esc(s.sample)}</td><td>${fmt(s.E)}</td><td>${fmt(s.sigma_max)}</td><td>${fmt(s.eps_at_sigma_max)}</td><td>${fmt(s.eps_break)}</td></tr>`).join("") + `</table>`;
-    $("params").innerHTML = `<small>E es la pendiente máxima de la curva σ–ε antes del esfuerzo máximo (regresión en ventanas deslizantes). ε a ruptura es la deformación donde el esfuerzo cae por debajo de 50 % del máximo. Este análisis no usa pyRheo.</small>`;
+    // 11.2 y 11.4: tres cifras significativas; 11.7: desviación estándar con dos
+    // toPrecision conserva los ceros finales (2.90, no 2.9); en notación científica solo si el número es muy grande o muy pequeño
+    const sig = n => v => (v === null || v === undefined || !isFinite(v)) ? "—" : (Math.abs(v) >= 1e5 || (v !== 0 && Math.abs(v) < 1e-3)) ? Number(v).toExponential(n - 1) : Number(v).toPrecision(n);
+    const s3 = sig(3), s2 = sig(2);
+    const sec_ = d.results.some(s => s.modulo.tipo === "secante"), R = d.resumen;
+    const cols = [["Módulo" + (sec_ ? "*" : "") + " [MPa]", s => s.modulo.valor, R.modulo], ["Resistencia a la tensión [MPa]", s => s.resistencia_tension, R.resistencia_tension],
+      ["Esfuerzo en cedencia [MPa]", s => s.cedencia && s.cedencia.esfuerzo, R.esfuerzo_cedencia], ["Deformación en cedencia [%]", s => s.cedencia && s.cedencia.deformacion, R.deformacion_cedencia],
+      ["Esfuerzo a la ruptura [MPa]", s => s.ruptura.esfuerzo, R.esfuerzo_ruptura], [(nominal ? "Deformación nominal" : "Elongación") + " a la ruptura [%]", s => s.ruptura.deformacion, R.deformacion_ruptura],
+      ["Tenacidad† [MJ/m³]", s => s.tenacidad_MJ_m3, R.tenacidad]];
+    $("mh").textContent = "Propiedades en tensión (ASTM D638-14)";
+    $("metrics").innerHTML = `<table><tr><th>Probeta</th>${cols.map(c => `<th>${c[0]}</th>`).join("")}</tr>` +
+      d.results.map(s => `<tr><td>${esc(s.sample)}</td>${cols.map(c => `<td>${s3(c[1](s))}${c[0].startsWith("Resistencia") ? `<br><small>${esc(s.designacion)}</small>` : ""}</td>`).join("")}</tr>`).join("") +
+      `<tr><th>Promedio (11.6)</th>${cols.map(c => `<th>${c[2] ? s3(c[2].promedio) : "—"}</th>`).join("")}</tr>` +
+      `<tr><th>Desv. est. (11.7)</th>${cols.map(c => `<th>${c[2] && c[2].desv_est !== null ? s2(c[2].desv_est) : "—"}</th>`).join("")}</tr></table>`;
+    $("mnote").innerHTML = (sec_ ? `* Módulo secante a ${s3(sec)} % de deformación en las probetas sin porción lineal (11.5). ` : "") +
+      `Deformaciones medidas desde el cero corregido del pie de curva (Anexo A1). † La tenacidad la pide el manual del laboratorio; D638 no la define. ` +
+      (d.errors && d.errors.length ? "No se pudo analizar: " + d.errors.map(e => `${e.sample} (${e.error})`).join("; ") + "." : "");
+    const ico = {ok:"✓", aviso:"⚠", info:"ℹ"}, col = {ok:"var(--acc)", aviso:"var(--acc2)", info:"var(--mute)"};
+    $("ph").textContent = "Verificación contra ASTM D638-14";
+    $("params").innerHTML = `<table>${d.verificaciones.map(c => `<tr><td style="color:${col[c.estado]};font-weight:600;width:1%">${ico[c.estado]}</td>` +
+      `<td style="white-space:nowrap;width:1%">${esc(c.clausula)}</td><td style="white-space:normal">${esc(c.texto)}</td></tr>`).join("")}</table>` +
+      `<details style="margin-top:10px"><summary><small>Reglas numéricas de esta implementación (D638 describe estos pasos de forma gráfica, sin algoritmo)</small></summary>` +
+      `<table>${Object.entries(d.implementacion).map(([k, v]) => `<tr><td style="width:1%">${esc(k.replace(/_/g, " "))}</td><td style="white-space:normal">${esc(v)}</td></tr>`).join("")}</table></details>`;
     $("res").hidden = false; $("res").scrollIntoView({behavior:"smooth", block:"start"});
   } catch (e) { note(e.message, "err"); }
   $("run").disabled = false; $("run").textContent = "Analizar";
@@ -331,6 +369,9 @@ $("run").onclick = async () => {
 
 function show(d) {
   $("res").hidden = false;  // visible antes de dibujar, para que Plotly mida el ancho real del recuadro
+  $("mh").textContent = "Comparación de modelos"; $("ph").textContent = "Parámetros";
+  $("mnote").innerHTML = "R² lineal puede ser engañoso con datos que abarcan varias décadas; R² log se calcula sobre log₁₀ de los datos. RSS<sub>w</sub> es el residual ponderado que pyRheo minimiza. " +
+    "El ajuste de modelos fraccionarios es un análisis complementario de la literatura (Miranda-Valdez et al., 2025); no es un procedimiento ASTM.";
   const ok = d.results.filter(r => !r.error), traces = [];
   const names = d.test === "saos" ? ["G′", "G″"] : [AXES[d.test][1].split(" ")[0]];
   d.ys.forEach((y, i) => traces.push({x:d.x, y, mode:"markers", name:"Datos " + names[i], marker:{size:7, color:i ? "#8a97a3" : "#17222d", symbol:i ? "square" : "circle", opacity:.75}}));
@@ -373,8 +414,15 @@ const plotImage = async format => {
 function csvText(d) {
   const rows = [];
   if (d.test === "tension") {
-    rows.push(["muestra","E_MPa","sigma_max_MPa","eps_en_sigma_max_pct","eps_ruptura_pct"]);
-    d.tensile.forEach(s => rows.push([s.sample, s.E, s.sigma_max, s.eps_at_sigma_max, s.eps_break]));
+    rows.push(["# ASTM D638-14", "deformaciones desde el cero corregido (Anexo A1)", last.xlabel || ""]);
+    rows.push(["probeta","modulo_tipo","modulo_MPa","resistencia_tension_MPa","designacion","esfuerzo_cedencia_MPa","deformacion_cedencia_pct",
+      "esfuerzo_ruptura_MPa","deformacion_ruptura_pct","tenacidad_MJ_m3","pie_de_curva_pct"]);
+    const g = (o, k) => o ? o[k] : "";
+    d.tensile.forEach(s => rows.push([s.sample, s.modulo.tipo, s.modulo.valor, s.resistencia_tension, `"${s.designacion}"`, g(s.cedencia, "esfuerzo"), g(s.cedencia, "deformacion"),
+      s.ruptura.esfuerzo, s.ruptura.deformacion, s.tenacidad_MJ_m3, s.pie_de_curva]));
+    const R = d.d638.resumen, st = k => [R.modulo, R.resistencia_tension, R.esfuerzo_cedencia, R.deformacion_cedencia, R.esfuerzo_ruptura, R.deformacion_ruptura, R.tenacidad].map(x => x ? x[k] ?? "" : "");
+    const [m, rt, ec, dc, er, dr, te] = st("promedio"), [m2, rt2, ec2, dc2, er2, dr2, te2] = st("desv_est");
+    rows.push(["promedio", "", m, rt, "", ec, dc, er, dr, te, ""], ["desv_est", "", m2, rt2, "", ec2, dc2, er2, dr2, te2, ""]);
   } else {
     rows.push(["modelo","parametro","valor","R2","R2_log","RSS_w"]);
     d.results.filter(r => !r.error).forEach(r => Object.entries(r.params).forEach(([k, v]) => rows.push([r.model, k, v, r.r2, r.r2_log, r.rss_w])));
@@ -385,10 +433,15 @@ function csvText(d) {
 function fitJson(d) {
   const base = {aplicacion:"SpringPlot", generado:new Date().toISOString(), ensayo:d.test, origen:d.meta || {}};
   let o;
-  if (d.test === "tension") o = {...base, unidades:{deformacion:"%", esfuerzo:"MPa"},
-    definiciones:{E:"pendiente máxima de la curva esfuerzo-deformación antes del esfuerzo máximo (regresión en ventanas deslizantes, deformación en fracción)",
-      eps_ruptura:"deformación donde el esfuerzo cae por debajo de 50 % del máximo", curvas:"reducidas a unos 500 puntos por muestra para graficar"},
-    muestras:d.tensile.map(s => ({muestra:s.sample, E:s.E, sigma_max:s.sigma_max, eps_en_sigma_max:s.eps_at_sigma_max, eps_ruptura:s.eps_break, deformacion:s.strain, esfuerzo:s.stress}))};
+  if (d.test === "tension") {
+    const k = d.d638;
+    o = {...base, norma:k.norma, unidades:{deformacion:"%", esfuerzo:"MPa", modulo:"MPa", tenacidad:"MJ/m³"}, eje_deformacion:d.xlabel,
+      secante_designada_pct:k.secante_designada, reglas_de_implementacion:k.implementacion, verificaciones:k.verificaciones, resumen:k.resumen,
+      notas:["Las deformaciones se miden desde el cero corregido del pie de curva (Anexo A1).", "La tenacidad la pide el manual del laboratorio; D638 no la define.",
+        "Las curvas se reducen a unos 600 puntos por probeta para graficar; cedencia, máximo y ruptura se conservan."],
+      probetas:d.tensile.map(s => { const {strain, stress, deformacion, esfuerzo, E, sigma_max, eps_break, ...rest} = s; return {...rest, curva:{deformacion, esfuerzo}}; }),
+      errores:k.errors || []};
+  }
   else o = {...base, configuracion:d.settings || null, ejes:d.axes || AXES[d.test], puntos_ajustados:d.n, puntos_validos:d.n_raw, nota:d.note || "",
     datos:{x:d.x, y:d.ys},
     resultados:d.results.map(r => r.error ? {modelo_solicitado:r.requested, error:r.error}
@@ -426,8 +479,8 @@ function pyCode(d) {
     d.tensile.forEach(s => L.push(`    {"nombre": ${pyStr(s.sample)}, "E": ${pyNum(s.E)}, "sigma_max": ${pyNum(s.sigma_max)}, "eps_ruptura": ${pyNum(s.eps_break)},`,
       `     "deformacion": ${pyArr(s.strain)},`, `     "esfuerzo": ${pyArr(s.stress)}},`));
     L.push("]", "", "fig, ax = plt.subplots(figsize=(8, 5))", "for m in muestras:",
-      `    ax.plot(m["deformacion"], m["esfuerzo"], lw=2, label=f"{m['nombre']}  (E = {m['E']:.3g} MPa, σ máx = {m['sigma_max']:.3g} MPa)")`,
-      `ax.set_xlabel(${pyStr(AXES.tension[0])})`, `ax.set_ylabel(${pyStr(AXES.tension[1])})`);
+      `    ax.plot(m["deformacion"], m["esfuerzo"], lw=2, label=f"{m['nombre']}  (módulo = {m['E']:.3g} MPa, resistencia = {m['sigma_max']:.3g} MPa)")`,
+      `ax.set_xlabel(${pyStr(d.xlabel || AXES.tension[0])})`, `ax.set_ylabel(${pyStr(AXES.tension[1])})`);
   } else {
     const ax = d.axes || AXES[d.test], saos = d.test === "saos", ok = d.results.filter(r => !r.error);
     const mod = {creep:"creep_model", relaxation:"relaxation_model", saos:"oscillation_model", steady:"rotation_model"}[d.test];
