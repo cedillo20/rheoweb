@@ -127,7 +127,11 @@ small{color:var(--mute)}
     <div class="models" id="models"></div>
     <label id="trw" style="display:flex;gap:8px;font-weight:400;margin-top:12px" hidden><input type="checkbox" id="trim" checked> Usar solo la parte útil (quita la rampa de carga y reinicia el tiempo)</label>
     <div id="secw" hidden><label for="secant">Deformación designada para módulo secante [%]</label><input type="number" id="secant" value="1" min="0.01" max="100" step="any">
-      <small>Solo se usa si una probeta no tiene porción lineal (ASTM D638, 11.5). Debe reportarse junto con el módulo.</small></div>
+      <small>Solo se usa si una probeta no tiene porción lineal (ASTM D638, 11.5). Debe reportarse junto con el módulo.</small>
+      <div id="unw" class="g2" hidden>
+        <div><label for="sunit">Deformación en</label><select id="sunit"><option value="pct">% </option><option value="frac">fracción (mm/mm)</option></select></div>
+        <div><label for="tunit">Esfuerzo en</label><select id="tunit"><option>MPa</option><option>kPa</option><option>Pa</option></select></div>
+      </div></div>
     <div class="row"><button id="run" disabled>Ajustar</button></div>
     <div id="msg"></div>
   </section>
@@ -237,7 +241,7 @@ const LBL = {auto:"Automático (sugerido por pyRheo)", Maxwell:"Maxwell", Spring
   HerschelBulkley:"Herschel-Bulkley", Bingham:"Bingham", PowerLaw:"Ley de potencia",
   CarreauYasuda:"Carreau-Yasuda", Cross:"Cross", Casson:"Casson"};
 const pretty = m => LBL[m] || String(m).replace(/([a-z])([A-Z])/g, "$1 $2");
-let file = null, status = null, last = null;
+let file = null, status = null, last = null, isFime = false;
 
 const esc = s => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const fmt = v => (v === null || v === undefined || Number.isNaN(v)) ? "—" : (Math.abs(v) >= 1e4 || (Math.abs(v) < 1e-2 && v !== 0) ? v.toExponential(3) : Number(v.toPrecision(4)).toString());
@@ -290,6 +294,7 @@ async function load(f, sheet, sample) {
   if (!r.ok) { note(d.detail || "Error al leer el archivo.", "err"); return; }
   $("sheet").innerHTML = d.sheets.map(s => `<option ${s === d.sheet ? "selected" : ""}>${esc(s)}</option>`).join("");
   $("shw").hidden = d.sheets.length < 2;
+  isFime = d.format === "FIME"; $("unw").hidden = isFime;  // los archivos FIME ya vienen en % y MPa
   $("sample").innerHTML = (d.samples || []).map(s => `<option ${s === d.sample ? "selected" : ""}>${esc(s)}</option>`).join("");
   $("smw").hidden = !d.samples || d.samples.length < 2;
   for (const id of ["xc","yc","y2c"]) $(id).innerHTML = d.columns.map(c => `<option>${esc(c)}</option>`).join("");
@@ -308,6 +313,7 @@ async function runTensile() {
   const sec = parseFloat($("secant").value);
   if (!(sec > 0 && sec <= 100)) { note("La deformación designada para el módulo secante debe estar entre 0 y 100 %.", "err"); return; }
   fd.append("secant", sec);
+  if (!isFime) { fd.append("strain_unit", $("sunit").value); fd.append("stress_unit", $("tunit").value); }
   $("run").disabled = true; $("run").textContent = "Analizando…"; note("");
   try {
     const r = await fetch("/api/tensile", {method:"POST", body:fd}), d = await r.json();
@@ -323,7 +329,7 @@ async function runTensile() {
       traces.push({x:s.strain, y:s.stress, mode:"lines", name:s.sample, legendgroup:s.sample, line:{color:c, width:2.2}});
       if (s.cedencia) traces.push({x:[s.cedencia.deformacion], y:[s.cedencia.esfuerzo], mode:"markers", name:`${s.sample} · cedencia`, legendgroup:s.sample, showlegend:false,
         marker:{symbol:"diamond", size:10, color:c, line:{color:"#fff", width:1}}, hovertemplate:"Cedencia (A2.22)<br>%{y:.3g} MPa · %{x:.3g} %<extra></extra>"});
-      traces.push({x:[s.ruptura.deformacion], y:[s.ruptura.esfuerzo], mode:"markers", name:`${s.sample} · ruptura`, legendgroup:s.sample, showlegend:false,
+      if (s.ruptura.detectada) traces.push({x:[s.ruptura.deformacion], y:[s.ruptura.esfuerzo], mode:"markers", name:`${s.sample} · ruptura`, legendgroup:s.sample, showlegend:false,
         marker:{symbol:"x", size:10, color:c}, hovertemplate:"Ruptura<br>%{y:.3g} MPa · %{x:.3g} %<extra></extra>"});
     });
     Plotly.newPlot("plot", traces, {xaxis:{title:xlab, gridcolor:"#d9e1e7"}, yaxis:{title:AXES.tension[1], gridcolor:"#d9e1e7"},
