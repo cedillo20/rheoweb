@@ -20,10 +20,10 @@ MAX_POINTS = 150  # puntos que se mandan al ajuste (muestreo logarítmico); los 
 FRONT = Path(__file__).resolve().parent.parent / "frontend"
 
 # Columnas calculadas para el formato de los reómetros de FIME (esfuerzo en MPa, deformación en %)
-J_NAME = "J(t) = Deformación/Tensión [1/MPa]"
-G_NAME = "G(t) = Tensión/Deformación [MPa]"
+J_NAME = "D(t) = Deformación/Tensión [1/MPa]"
+G_NAME = "E(t) = Tensión/Deformación [MPa]"
 
-app = FastAPI(title="PyRheo Web")
+app = FastAPI(title="SpringPlot")
 
 
 def _norm(s):
@@ -170,20 +170,26 @@ def guess_fime(df):
 
 # ---------------------------------------------------------------- preprocesado
 def fime_segment(df, test):
-    """Quita la rampa de carga y reinicia el tiempo en el inicio de la parte útil.
-       relajación: la parte útil empieza en el pico de esfuerzo (fin de la rampa de deformación).
-       creep: empieza cuando el esfuerzo alcanza 98 % de su valor constante."""
+    """Corrección por la rampa de carga (superposición de Boltzmann).
+    El ensayo ideal aplica la carga de golpe; la máquina la aplica en una rampa de duración t_r. Para tiempos
+    posteriores a la rampa, medir el tiempo desde la MITAD de la rampa reproduce la respuesta a una carga
+    instantánea con error menor a 1 % (simulado con el modelo ajustado a los datos de FIME: con el origen al
+    final de la rampa el sesgo llegaba a 11 % en relajación y 4.5 % en creep).
+    La variable controlada define la rampa: deformación en relajación, esfuerzo en creep.
+    Inicio de la rampa: primer punto >= 2 % del valor sostenido; fin: primer punto >= 98 %.
+    Se conservan los datos desde el fin de la rampa. Devuelve (datos, info de la rampa)."""
     m = fime_meta(df)
-    d = df.dropna(subset=[m["t"], m["s"]]).reset_index(drop=True)
-    sig = d[m["s"]].to_numpy(float)
-    if test == "relaxation":
-        i0 = int(np.argmax(sig))
-    else:
-        plateau = float(np.median(sig[len(sig) // 2:]))
-        i0 = int(np.argmax(sig >= 0.98 * plateau))
-    out = d.iloc[i0:].copy()
-    out[m["t"]] = out[m["t"]] - out[m["t"]].iloc[0]
-    return out
+    ctrl = m["e"] if test == "relaxation" else m["s"]
+    d = df.dropna(subset=[m["t"], m["s"], m["e"]]).reset_index(drop=True)
+    v = d[ctrl].to_numpy(float)
+    t = d[m["t"]].to_numpy(float)
+    hold = float(np.median(v[len(v) // 2:]))
+    i_a = int(np.argmax(v >= 0.02 * hold))
+    i_b = int(np.argmax(v >= 0.98 * hold))
+    t0 = (t[i_a] + t[i_b]) / 2
+    out = d.iloc[i_b:].copy()
+    out[m["t"]] = out[m["t"]] - t0
+    return out, {"inicio_s": float(t[i_a]), "fin_s": float(t[i_b]), "duracion_s": float(t[i_b] - t[i_a]), "origen_s": float(t0)}
 
 
 def thin(data, xcol, n=MAX_POINTS):
@@ -221,8 +227,9 @@ async def fit(file: UploadFile = File(...), test: str = Form(...), x_col: str = 
         raise HTTPException(400, "Tipo de ensayo no válido.")
     tb = load_table(file, await file.read(), sheet, sample)
     df = tb["df"]
+    ramp = None
     if tb["fime"] and test in ("creep", "relaxation") and trim == "1":
-        df = fime_segment(df, test)
+        df, ramp = fime_segment(df, test)
     cols = [x_col, y_col] + ([y2_col] if test == "saos" else [])
     if test == "saos" and not y2_col:
         raise HTTPException(400, "SAOS necesita G′ y G″.")
@@ -246,12 +253,20 @@ async def fit(file: UploadFile = File(...), test: str = Form(...), x_col: str = 
     resp = {"n": len(x), "n_raw": n_raw, "x": x.tolist(), "ys": [y.tolist() for y in ys], "results": results, "pyrheo": PYRHEO,
             "settings": {**fit_settings(test), "max_puntos_ajuste": MAX_POINTS, "muestreo": "logarítmico en x", "filtro": "solo valores positivos"}}
     if tb["fime"] and test in ("creep", "relaxation"):
-        resp["axes"] = ["t [s]", "J(t) [1/MPa]" if test == "creep" else "G(t) [MPa]"]
-        resp["note"] = (f"Formato FIME, muestra {tb['sample']}. " +
-                        (("Tiempo reiniciado cuando el esfuerzo se vuelve constante. " if test == "creep"
-                          else "Tiempo reiniciado en el pico de esfuerzo. ") if trim == "1" else "") +
-                        ("J = Deformación/Tensión en 1/MPa. " if test == "creep" else "G = Tensión/Deformación en MPa. ") +
+        resp["modo"] = "tension"
+        resp["axes"] = ["t [s]", "D(t) [1/MPa]" if test == "creep" else "E(t) [MPa]"]
+        resp["rampa"] = ramp
+        resp["note"] = (f"Muestra {tb['sample']}. " +
+                        (f"Rampa de carga de {ramp['duracion_s']:.3g} s: el tiempo se mide desde la mitad de la rampa "
+                         "(superposición de Boltzmann) y se usan los datos desde su final. " if ramp else
+                         "Sin corrección de rampa: los primeros segundos están sesgados por la carga. ") +
+                        ("D(t) = Deformación/Tensión, complianza de creep en tensión, en 1/MPa. " if test == "creep" else
+                         "E(t) = Tensión/Deformación, módulo de relajación en tensión, en MPa. ") +
+                        "pyRheo llama G a sus parámetros de módulo; aquí son módulos de tensión. " +
                         f"Se ajustaron {len(x)} de {n_raw} puntos (muestreo logarítmico).")
+    else:
+        # archivos genéricos: no se suponen unidades; los ejes llevan el nombre de las columnas
+        resp["axes"] = [x_col, f"{y_col} / {y2_col}" if test == "saos" else y_col]
     return resp
 
 
@@ -328,3 +343,4 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=FRONT), name="static")
+
