@@ -130,7 +130,10 @@ def fit_settings(test):
     s = {"motor": "pyRheo", "version_pyrheo": ver, "repositorio": "https://github.com/mirandi1/pyRheo",
          "initial_guesses": "random", "num_initial_guesses": NUM_GUESSES, "cost_function": "RSS (ponderado por y)",
          "minimization_algorithm": "Powell" if test in ("creep", "relaxation") else "Nelder-Mead",
-         "semilla": "no fijada: los parametros pueden variar ligeramente entre ejecuciones",
+         "semillas": list(SEEDS),
+         "reintentos": f"se ajusta con la semilla {SEEDS[0]} de numpy.random; si R² log < {RETRY_R2_LOG} se repite con las "
+                       f"semillas {', '.join(map(str, SEEDS[1:]))} y se conserva el intento de menor RSS_w. La semilla usada "
+                       "por cada modelo se reporta en sus resultados: con el mismo archivo y configuración el ajuste es idéntico.",
          "limite_por_modelo_s": MODEL_TIMEOUT}
     if test in ("creep", "relaxation"):
         s["mittag_leffler_type"] = "Pade32"
@@ -176,13 +179,17 @@ def _fit_one(test, name, x, y, xd):
         "r2": _r2(y, yhat), "r2_log": _r2(np.log10(y), np.log10(np.abs(yhat) + 1e-300)),
         "rss_w": float(np.sum(((y - yhat) / y) ** 2)),
         "curve_x": xd.tolist(), "curve_y": [c.tolist() for c in split(yd)],
+        # residuo relativo en cada punto medido, en %: (dato - modelo) / dato
+        "resid": [[float(v) if np.isfinite(v) else None for v in c] for c in split((y - yhat) / y * 100.0)],
     }
 
 
-def _worker(conn, test, name, x, y, xd):
+def _worker(conn, test, name, x, y, xd, seed):
     import contextlib, io, warnings
     warnings.filterwarnings("ignore")
     try:
+        # pyRheo genera sus valores iniciales con el generador global de NumPy: fijarlo hace el ajuste reproducible
+        np.random.seed(seed)
         with contextlib.redirect_stdout(io.StringIO()):
             conn.send(_fit_one(test, name, x, y, xd))
     except Exception as e:  # noqa
@@ -191,39 +198,61 @@ def _worker(conn, test, name, x, y, xd):
         conn.close()
 
 
-MODEL_TIMEOUT = 30   # segundos por modelo; los de 5-6 parametros pueden no terminar nunca
+MODEL_TIMEOUT = 30   # segundos por intento; los modelos de 5-6 parametros pueden no terminar nunca
 TOTAL_BUDGET = 80    # segundos por solicitud (Render corta las peticiones largas)
+SEEDS = (0, 1, 2)    # semillas fijas: la primera siempre; las demas solo si el ajuste sale pobre
+RETRY_R2_LOG = 0.95  # si R2 log < este valor se reintenta con la siguiente semilla y se conserva el de menor RSS_w
+
+
+def _attempt(test, name, x, y, xd, seed, limit):
+    import multiprocessing as mp
+    parent, child = mp.Pipe(duplex=False)
+    p = mp.Process(target=_worker, args=(child, test, name, x, y, xd, seed), daemon=True)
+    p.start()
+    child.close()
+    if parent.poll(limit):
+        try:
+            res = parent.recv()
+        except EOFError:
+            res = {"requested": name, "error": "El ajuste terminó sin resultado (posible falta de memoria)."}
+    else:
+        res = {"requested": name, "error": f"Tardó más de {int(limit)} s y se canceló. Prueba con un modelo con menos parámetros."}
+    if p.is_alive():
+        p.terminate()
+    p.join(2)
+    return res
 
 
 def run_fit(test, x, ys, models):
     """x: array; ys: lista de arrays (1 para creep/relax/steady, 2 para SAOS: G', G'').
-    Cada modelo corre en su propio proceso con limite de tiempo: si uno no termina se corta y se avisa."""
-    import multiprocessing as mp
+    Cada intento corre en su propio proceso con limite de tiempo y semilla fija (resultado reproducible).
+    Si el ajuste sale pobre (R2 log < RETRY_R2_LOG) se repite con las semillas siguientes y se conserva el mejor."""
     import time
     y = np.concatenate(ys)
     xd = np.logspace(np.log10(x.min()), np.log10(x.max()), 200)
     out, t_start = [], time.time()
     for name in models:
-        left = TOTAL_BUDGET - (time.time() - t_start)
-        if left < 3:
-            out.append({"requested": name, "error": "Omitido: se agotó el tiempo total de la solicitud. Ajusta menos modelos a la vez."})
-            continue
-        limit = min(MODEL_TIMEOUT, left)
-        parent, child = mp.Pipe(duplex=False)
-        p = mp.Process(target=_worker, args=(child, test, name, x, y, xd), daemon=True)
-        p.start()
-        child.close()
-        res = None
-        if parent.poll(limit):
-            try:
-                res = parent.recv()
-            except EOFError:
-                res = {"requested": name, "error": "El ajuste terminó sin resultado (posible falta de memoria)."}
-        else:
-            res = {"requested": name, "error": f"Tardó más de {int(limit)} s y se canceló. Prueba con un modelo con menos parámetros."}
-        if p.is_alive():
-            p.terminate()
-        p.join(2)
-        out.append(res)
+        best, tried = None, []
+        for seed in SEEDS:
+            left = TOTAL_BUDGET - (time.time() - t_start)
+            if left < 3:
+                if best is None:
+                    best = {"requested": name, "error": "Omitido: se agotó el tiempo total de la solicitud. Ajusta menos modelos a la vez."}
+                break
+            res = _attempt(test, name, x, y, xd, seed, min(MODEL_TIMEOUT, left))
+            tried.append(seed)
+            if "error" in res:
+                if best is None:
+                    best = res
+                if "Tardó" in res["error"] or not PYRHEO:
+                    break          # si un intento no termina a tiempo, los demás tampoco lo harán
+                continue
+            if best is None or "error" in best or res["rss_w"] < best["rss_w"]:
+                best = {**res, "semilla": seed}
+            if not PYRHEO or res["r2_log"] >= RETRY_R2_LOG:
+                break
+        best["intentos"] = len(tried)
+        best["semillas_probadas"] = tried
+        out.append(best)
     out.sort(key=lambda r: r.get("rss_w", float("inf")))
     return out
