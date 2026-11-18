@@ -176,6 +176,31 @@ def _polish(test, model, params, x, y, maxfev=250):
     return (from_th(r.x), True) if r.fun < c0 else (dict(params), False)
 
 
+def _analytic_start(test, model, x, y):
+    """Valores iniciales exactos por linealización para los modelos que la admiten.
+    Maxwell relajación: ln G = ln G_s - t/tau ; Maxwell creep: J = 1/G_s + t/eta_s ;
+    Springpot: ln G = ln(V/Gamma(1-a)) - a ln t (relajación) y ln J = -ln(V Gamma(1+a)) + a ln t (creep).
+    pyRheo sortea los valores iniciales en un rango derivado de los datos y, con tiempos espaciados linealmente,
+    no encontraba la solución de Maxwell en relajación (R² = -0.49 con datos exactos)."""
+    try:
+        if model == "Maxwell" and test == "relaxation":
+            k, b = np.polyfit(x, np.log(y), 1)
+            return {"G_s": float(np.exp(b)), "eta_s": float(np.exp(b) * (-1 / k))} if k < 0 else None
+        if model == "Maxwell" and test == "creep":
+            k, b = np.polyfit(x, y, 1)
+            return {"G_s": float(1 / b), "eta_s": float(1 / k)} if k > 0 and b > 0 else None
+        if model == "SpringPot" and test in ("creep", "relaxation"):
+            k, b = np.polyfit(np.log(x), np.log(y), 1)
+            a = -k if test == "relaxation" else k
+            if not 0 < a < 1:
+                return None
+            V = np.exp(b) * _gamma(1 - a) if test == "relaxation" else 1 / (np.exp(b) * _gamma(1 + a))
+            return {"V": float(V), "alpha": float(a)}
+    except Exception:  # noqa
+        return None
+    return None
+
+
 def _fit_pyrheo(test, model, x, y, n_guesses=None):
     """VERIFICAR: nombres de clases, argumentos y atributos según el repo/documentación de pyRheo."""
     cls = {"creep": CreepModel, "relaxation": RelaxationModel,
@@ -230,6 +255,8 @@ def fit_settings(test):
         s["mittag_leffler"] = (f"la optimización usa la aproximación {ML_FIT}; curvas, métricas y residuos se calculan con el método "
                                f"exacto ({ML_EXACT}). Si ambos difieren más de {ML_TOL * 100:g} % en los datos, los parámetros se "
                                "repulen con el método exacto (Nelder-Mead, máx. 250 evaluaciones).")
+    s["inicio_analitico"] = ("Maxwell y Springpot en creep y relajación también se ajustan desde valores iniciales exactos por "
+                             "linealización; se conserva el resultado de menor RSS_w")
     s["correcciones_pyrheo"] = ["creep de FractionalZenerSolidS con el tiempo de retardo correcto (pyRheo 1.0.3 usa el de relajación)",
                                 "las curvas se evalúan con la misma función con la que se reportan las métricas"]
     return s
@@ -252,7 +279,7 @@ def predict_response(model, params, target, x):
 
 def _fit_one(test, name, x, y, xd, n_guesses=None):
     """Ajusta un modelo y devuelve el dict de resultado (solo tipos simples, para poder cruzar procesos)."""
-    ml = None
+    ml, start = None, "aleatorio (pyRheo)"
     if PYRHEO:
         params, _, chosen = _fit_pyrheo(test, name, x, y, n_guesses)
         params = {k: float(v) for k, v in params.items()}
@@ -264,6 +291,15 @@ def _fit_one(test, name, x, y, xd, n_guesses=None):
             ml = {"optimizacion": ML_FIT, "curvas_y_metricas": ML_EXACT, "desviacion_pade_pct": dev * 100, "repulido": False}
             if dev > ML_TOL:
                 params, ml["repulido"] = _polish(test, chosen, params, x, y)
+                yhat = model_eval(test, chosen, params, x)
+        # inicio analítico: si da menor RSS_w que la búsqueda aleatoria de pyRheo, se usa ese resultado
+        p0 = _analytic_start(test, chosen, x, y)
+        if p0:
+            cost = lambda p: float(np.sum(((y - model_eval(test, chosen, p, x)) / y) ** 2))
+            cand, _ = _polish(test, chosen, p0, x, y, maxfev=400)
+            c_cand, c_cur = cost(cand), cost(params)
+            if np.isfinite(c_cand) and (not np.isfinite(c_cur) or c_cand < c_cur):
+                params, start = cand, "analítico (linealización)"
                 yhat = model_eval(test, chosen, params, x)
         pred = lambda xx: model_eval(test, chosen, params, xx)
     else:
@@ -281,6 +317,7 @@ def _fit_one(test, name, x, y, xd, n_guesses=None):
         # residuo relativo en cada punto medido, en %: (dato - modelo) / dato
         "resid": [[float(v) if np.isfinite(v) else None for v in c] for c in split((y - yhat) / y * 100.0)],
         "mittag_leffler": ml,
+        "inicio": start,
     }
 
 
