@@ -139,6 +139,10 @@ small{color:var(--mute)}
         <div class="dl"><span>Descargar gráfica:</span><button class="ghost sm" id="png">PNG</button><button class="ghost sm" id="svg">SVG</button></div>
       </div>
       <div id="plot" style="height:430px"></div>
+      <div id="resw" hidden>
+        <small><b>Residuos relativos:</b> (dato − modelo) / dato, en cada punto ajustado. Puntos repartidos al azar alrededor de 0 indican buen ajuste; una tendencia u onda indica que el modelo no reproduce la forma de la curva. Haz clic en un modelo de la leyenda para ocultarlo en ambas gráficas.</small>
+        <div id="resplot" style="height:240px"></div>
+      </div>
       <div class="row">
         <button class="ghost" id="json" title="Datos, parámetros, curvas y configuración del ajuste, para poder replicarlo">Descargar ajuste (JSON)</button>
         <button class="ghost" id="csv">Descargar resultados (CSV)</button>
@@ -308,7 +312,7 @@ async function runTensile() {
     const nominal = d.verificaciones.some(c => c.clausula.startsWith("10.3") && c.estado === "aviso");
     const xlab = nominal ? "Deformación nominal [%]" : "Deformación [%]";
     last = {test:"tension", tensile:d.results, d638:d, xlabel:xlab, meta:{archivo:file.name, hoja:$("sheet").value, formato:d.format || "", secante_designada:sec}};
-    $("res").hidden = false;
+    $("res").hidden = false; $("resw").hidden = true;
     const traces = [];
     d.results.forEach((s, k) => {
       const c = COLORS[k % COLORS.length];
@@ -370,7 +374,7 @@ $("run").onclick = async () => {
 function show(d) {
   $("res").hidden = false;  // visible antes de dibujar, para que Plotly mida el ancho real del recuadro
   $("mh").textContent = "Comparación de modelos"; $("ph").textContent = "Parámetros";
-  $("mnote").innerHTML = "R² lineal puede ser engañoso con datos que abarcan varias décadas; R² log se calcula sobre log₁₀ de los datos. RSS<sub>w</sub> es el residual ponderado que pyRheo minimiza. " +
+  $("mnote").innerHTML = "R² lineal puede ser engañoso con datos que abarcan varias décadas; R² log se calcula sobre log₁₀ de los datos. RSS<sub>w</sub> es el residual ponderado que pyRheo minimiza. Cada ajuste usa una semilla aleatoria fija, así que el mismo archivo da siempre el mismo resultado; si el ajuste sale pobre (R² log &lt; 0.95) se reintenta con otras semillas y se conserva el mejor. " +
     "El ajuste de modelos fraccionarios es un análisis complementario de la literatura (Miranda-Valdez et al., 2025); no es un procedimiento ASTM.";
   const ok = d.results.filter(r => !r.error), traces = [];
   const names = d.test === "saos" ? ["G′", "G″"] : [AXES[d.test][1].split(" ")[0]];
@@ -383,9 +387,27 @@ function show(d) {
     yaxis:{type:"log", title:ax[1], color:fg, gridcolor:dark ? "#2b3946" : "#d9e1e7"},
     paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:fg}, margin:{t:10, r:10}, legend:{orientation:"h", y:-0.22}}, {responsive:true});
 
+  // Residuos: mismos colores que las curvas; en SAOS, G′ con línea continua y G″ discontinua
+  const rtr = [];
+  ok.forEach((r, k) => (r.resid || []).forEach((rv, i) => rtr.push({x:d.x, y:rv, mode:"lines+markers", name:`${pretty(r.model)}${d.test === "saos" ? " " + names[i] : ""}`,
+    line:{color:COLORS[k % COLORS.length], width:1.2, dash:i ? "dash" : "solid"}, marker:{size:5, color:COLORS[k % COLORS.length], symbol:i ? "square" : "circle"},
+    hovertemplate:`${esc(pretty(r.model))}<br>%{x:.3g} → %{y:.2f} %<extra></extra>`})));
+  $("resw").hidden = !rtr.length;
+  if (rtr.length) Plotly.newPlot("resplot", rtr, {xaxis:{type:"log", title:ax[0], color:fg, gridcolor:"#d9e1e7"},
+    yaxis:{title:"Residuo [%]", color:fg, gridcolor:"#d9e1e7", zeroline:true, zerolinecolor:"#17222d", zerolinewidth:1.5},
+    showlegend:false, paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:fg}, margin:{t:8, r:10, b:50}}, {responsive:true});
+  // Ocultar un modelo en la leyenda de la gráfica principal también lo oculta en los residuos (y la escala se reajusta)
+  const gd = $("plot");
+  if (gd.removeAllListeners) gd.removeAllListeners("plotly_restyle");
+  if (rtr.length) gd.on("plotly_restyle", () => {
+    const vis = {}; gd.data.forEach(t => vis[t.name] = t.visible === undefined ? true : t.visible);
+    Plotly.restyle("resplot", {visible:$("resplot").data.map(t => t.name in vis ? vis[t.name] : true)});
+    Plotly.relayout("resplot", {"yaxis.autorange":true});
+  });
+
   $("metrics").innerHTML = `<table><tr><th>Modelo</th><th>R²</th><th>R² log</th><th>RSS<sub>w</sub></th></tr>` + d.results.map(r => r.error
-    ? `<tr><td>${esc(pretty(r.requested))}</td><td colspan="3">${esc(r.error)}</td></tr>`
-    : `<tr><td>${esc(pretty(r.model))}${r.requested === "auto" ? " <small>(auto)</small>" : ""}</td><td>${fmt(r.r2)}</td><td>${fmt(r.r2_log)}</td><td>${fmt(r.rss_w)}</td></tr>`).join("") + `</table>`;
+    ? `<tr><td>${esc(pretty(r.requested))}</td><td colspan="3">${esc(r.error)}${r.intentos > 1 ? ` <small>(${r.intentos} intentos)</small>` : ""}</td></tr>`
+    : `<tr><td>${esc(pretty(r.model))}${r.requested === "auto" ? " <small>(auto)</small>" : ""}${r.semilla !== undefined ? `<br><small>semilla ${r.semilla}${r.intentos > 1 ? ` · ${r.intentos} intentos` : ""}</small>` : ""}</td><td>${fmt(r.r2)}</td><td>${fmt(r.r2_log)}</td><td>${fmt(r.rss_w)}</td></tr>`).join("") + `</table>`;
   $("params").innerHTML = `<table><tr><th>Modelo</th><th>Parámetro</th><th>Valor</th></tr>` + ok.flatMap(r =>
     Object.entries(r.params).map(([k, v]) => `<tr><td>${esc(pretty(r.model))}</td><td>${esc(k)}</td><td>${fmt(v)}</td></tr>`)).join("") + `</table>`;
   $("res").hidden = false; $("res").scrollIntoView({behavior:"smooth", block:"start"});
@@ -406,10 +428,21 @@ function plotTitle() {
   return "Ajuste de " + name + (m.muestra && m.n_muestras > 1 ? " · " + m.muestra : "");
 }
 // La imagen se genera de una copia de la gráfica con título y fondo blanco; la gráfica en pantalla no cambia
+// Con residuos visibles, la imagen lleva la gráfica de residuos debajo de la principal (mismo eje x)
 const plotImage = async format => {
-  const gd = $("plot"), layout = {...gd.layout, title:{text:esc(plotTitle()), font:{size:20, color:"#17222d"}, x:0.5, xanchor:"center"},
-    margin:{...gd.layout.margin, t:70}, paper_bgcolor:"#ffffff", plot_bgcolor:"#ffffff"};
-  return (await fetch(await Plotly.toImage({data:gd.data, layout}, {format, width:1200, height:760}))).blob();
+  const gd = $("plot"), title = {text:esc(plotTitle()), font:{size:20, color:"#17222d"}, x:0.5, xanchor:"center"};
+  const base = {paper_bgcolor:"#ffffff", plot_bgcolor:"#ffffff", font:gd.layout.font, legend:gd.layout.legend};
+  let data = gd.data, layout = {...gd.layout, ...base, title, margin:{...gd.layout.margin, t:70}}, height = 760;
+  const rp = $("resplot");
+  if (!$("resw").hidden && rp.data) {
+    const ry = rp.layout.yaxis, mx = gd.layout.xaxis;
+    data = [...gd.data, ...rp.data.map(t => ({...t, xaxis:"x", yaxis:"y2", showlegend:false}))];
+    layout = {...base, title, margin:{t:70, r:20, l:80, b:60}, xaxis:{...mx, anchor:"y2"},
+      yaxis:{...gd.layout.yaxis, domain:[0.36, 1]}, yaxis2:{...ry, domain:[0, 0.27], anchor:"x"},
+      legend:{orientation:"h", x:0, y:1.0, yanchor:"bottom"}};
+    height = 980;
+  }
+  return (await fetch(await Plotly.toImage({data, layout}, {format, width:1200, height}))).blob();
 };
 function csvText(d) {
   const rows = [];
@@ -445,7 +478,9 @@ function fitJson(d) {
   else o = {...base, configuracion:d.settings || null, ejes:d.axes || AXES[d.test], puntos_ajustados:d.n, puntos_validos:d.n_raw, nota:d.note || "",
     datos:{x:d.x, y:d.ys},
     resultados:d.results.map(r => r.error ? {modelo_solicitado:r.requested, error:r.error}
-      : {modelo_solicitado:r.requested, modelo:r.model, parametros:r.params, r2:r.r2, r2_log:r.r2_log, rss_w:r.rss_w, curva:{x:r.curve_x, y:r.curve_y}})};
+      : {modelo_solicitado:r.requested, modelo:r.model, parametros:r.params, r2:r.r2, r2_log:r.r2_log, rss_w:r.rss_w, curva:{x:r.curve_x, y:r.curve_y},
+         residuos_pct:{definicion:"(dato - modelo) / dato x 100, en cada x de datos", valores:r.resid || null},
+         semilla:r.semilla ?? null, intentos:r.intentos ?? null, semillas_probadas:r.semillas_probadas || null})};
   // con sangría, pero cada lista de números en una sola línea
   return JSON.stringify(o, null, 2).replace(/\[[\s\d.eE+,\-]*?\]/g, m => m.replace(/\s+/g, " ").replace("[ ", "[").replace(" ]", "]")).replace(/null,\s+(?=[\d\-n])/g, "null, ");
 }
@@ -491,6 +526,7 @@ function pyCode(d) {
       L.push(`    {"modelo": ${pyStr(r.model)}, "nombre": ${pyStr(pretty(r.model))}, "r2": ${pyNum(r.r2)}, "r2_log": ${pyNum(r.r2_log)},`,
         `     "parametros": {${Object.entries(r.params).map(([k, v]) => `${pyStr(k)}: ${pyNum(v)}`).join(", ")}},`, `     "x": ${pyArr(r.curve_x)},`);
       r.curve_y.forEach((cy, i) => L.push(`     "y${saos ? i + 1 : ""}": ${pyArr(cy)},`));
+      (r.resid || []).forEach((rv, i) => L.push(`     "r${saos ? i + 1 : ""}": ${pyArr(rv)},  # residuo relativo en %, en cada x de datos`));
       L.push("    },");
     });
     L.push("]", "", "# Opcional: recalcular las curvas con pyRheo a partir de los parámetros (por ejemplo, en otro rango de x).",
@@ -498,13 +534,17 @@ function pyCode(d) {
       `    from pyRheo.${mod} import MODEL_FUNCS, MODEL_PARAMS`, "    xx = np.logspace(np.log10(x.min()), np.log10(x.max()), 200)", "    for a in ajustes:",
       `        yy = np.asarray(MODEL_FUNCS[a["modelo"]](*[a["parametros"][k] for k in MODEL_PARAMS[a["modelo"]]], xx))`, `        a["x"] = xx`,
       saos ? `        a["y1"], a["y2"] = yy[:len(xx)], yy[len(xx):]` : `        a["y"] = yy`, "",
-      "fig, ax = plt.subplots(figsize=(8, 5))");
+      "# Gráfica principal arriba y residuos relativos abajo, con el mismo eje x",
+      `fig, (ax, axr) = plt.subplots(2, 1, figsize=(8, 7), sharex=True, gridspec_kw={"height_ratios": [3, 1.3]})`);
     if (saos) L.push(`ax.plot(x, y1, "o", color="#17222d", ms=5, alpha=0.75, label="Datos G′")`, `ax.plot(x, y2, "s", color="#8a97a3", ms=5, alpha=0.75, label="Datos G″")`);
     else L.push(`ax.plot(x, y, "o", color="#17222d", ms=5, alpha=0.75, label="Datos")`);
     L.push(`colores = ${JSON.stringify(COLORS)}`, "for i, a in enumerate(ajustes):", "    c = colores[i % len(colores)]");
     if (saos) L.push(`    ax.plot(a["x"], a["y1"], "-", color=c, lw=2, label=f"{a['nombre']} G′ (R² log = {a['r2_log']:.4f})")`, `    ax.plot(a["x"], a["y2"], "--", color=c, lw=2, label=f"{a['nombre']} G″")`);
     else L.push(`    ax.plot(a["x"], a["y"], "-", color=c, lw=2, label=f"{a['nombre']} (R² log = {a['r2_log']:.4f})")`);
-    L.push(`ax.set_xscale("log")`, `ax.set_yscale("log")`, `ax.set_xlabel(${pyStr(ax[0])})`, `ax.set_ylabel(${pyStr(ax[1])})`);
+    if (saos) L.push(`    axr.plot(x, a["r1"], "o-", color=c, ms=4, lw=1)`, `    axr.plot(x, a["r2"], "s--", color=c, ms=4, lw=1)`);
+    else L.push(`    axr.plot(x, a["r"], "o-", color=c, ms=4, lw=1)`);
+    L.push(`ax.set_xscale("log")`, `ax.set_yscale("log")`, `ax.set_ylabel(${pyStr(ax[1])})`,
+      `axr.axhline(0, color="#17222d", lw=1.2)`, `axr.set_ylabel("Residuo [%]")`, `axr.set_xlabel(${pyStr(ax[0])})`, `axr.grid(True, which="both", alpha=0.3)`);
   }
   L.push(`ax.set_title(${pyStr(plotTitle())})`, `ax.grid(True, which="both", alpha=0.3)`, "ax.legend()", "fig.tight_layout()", `fig.savefig("springplot_grafica.png", dpi=200)`, "plt.show()", "");
   return L.join("\n");
