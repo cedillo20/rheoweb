@@ -141,6 +141,10 @@ small{color:var(--mute)}
     <label id="mlab">Modelos</label>
     <div class="models" id="models"></div>
     <label id="trw" style="display:flex;gap:8px;font-weight:400;margin-top:12px" hidden><input type="checkbox" id="trim" checked> Usar solo la parte útil (quita la rampa de carga y reinicia el tiempo)</label>
+    <div id="wmw"><label for="wmode">Ponderación del ajuste</label>
+      <select id="wmode"><option value="decada">Igual peso por década</option><option value="todos">Todas las observaciones (como pyRheo)</option></select>
+      <small>Los datos se promedian en intervalos logarítmicos. «Igual peso por década» da la misma importancia a cada escala de tiempo;
+      «Todas las observaciones» pesa cada intervalo según cuántos datos promedia (domina el tramo con más mediciones). Declara la opción en tu reporte.</small></div>
     <div id="secw" hidden><label for="secant">Deformación designada para módulo secante [%]</label><input type="number" id="secant" value="1" min="0.01" max="100" step="any">
       <small>Solo se usa si una probeta no tiene porción lineal (ASTM D638, 11.5). Debe reportarse junto con el módulo.</small>
       <div id="unw" class="g2" hidden>
@@ -281,7 +285,7 @@ function renderModels() {
   $("run").textContent = t === "tension" ? "Analizar" : "Ajustar";
   $("models").innerHTML = list.map((m, i) => `<label><input type="checkbox" value="${m}" ${i < 2 ? "checked" : ""}> ${esc(pretty(m))}</label>`).join("");
   $("xl").textContent = LABELS[t][0]; $("yl").textContent = LABELS[t][1];
-  $("y2w").hidden = t !== "saos"; $("trw").hidden = !(t === "relaxation" || t === "creep"); $("secw").hidden = t !== "tension";
+  $("y2w").hidden = t !== "saos"; $("trw").hidden = !(t === "relaxation" || t === "creep"); $("secw").hidden = t !== "tension"; $("wmw").hidden = t === "tension";
   guessCols();
 }
 $("test").onchange = renderModels;
@@ -417,7 +421,7 @@ $("run").onclick = async () => {
   const fd = new FormData(), t = $("test").value;
   fd.append("file", file); fd.append("test", t); fd.append("x_col", $("xc").value);
   fd.append("y_col", $("yc").value); fd.append("y2_col", t === "saos" ? $("y2c").value : "");
-  fd.append("models", JSON.stringify(models)); fd.append("sheet", $("sheet").value); fd.append("sample", $("sample").value); fd.append("trim", $("trim").checked ? "1" : "0");
+  fd.append("models", JSON.stringify(models)); fd.append("sheet", $("sheet").value); fd.append("sample", $("sample").value); fd.append("trim", $("trim").checked ? "1" : "0"); fd.append("weighting", $("wmode").value);
   $("run").disabled = true; $("run").textContent = "Ajustando…"; note("");
   try {
     const r = await fetch("/api/fit", {method:"POST", body:fd}), d = await r.json();
@@ -432,7 +436,9 @@ $("run").onclick = async () => {
 function show(d, scroll = true) {
   $("res").hidden = false;  // visible antes de dibujar, para que Plotly mida el ancho real del recuadro
   $("mh").textContent = "Comparación de modelos"; $("ph").textContent = "Parámetros";
-  $("mnote").innerHTML = "R² lineal puede ser engañoso con datos que abarcan varias décadas; R² log se calcula sobre log₁₀ de los datos. RSS<sub>w</sub> es el residual ponderado que pyRheo minimiza. Cada ajuste usa una semilla aleatoria fija, así que el mismo archivo da siempre el mismo resultado; si el ajuste sale pobre (R² log &lt; 0.95) se reintenta con otras semillas y se conserva el mejor. " +
+  $("mnote").innerHTML = "RMS y P95: error relativo sobre <b>todas</b> las observaciones válidas (no solo los promedios ajustados); son las métricas más directas para comparar modelos. " +
+    "R², R² log y RSS<sub>w</sub> se calculan sobre los promedios por intervalo; RSS<sub>w</sub> es la pérdida ponderada que se minimiza. " +
+    "Cada modelo se ajusta con la búsqueda de pyRheo y con proyección de variables (coeficientes lineales exactos) y se conserva el mejor. Cada ajuste usa una semilla aleatoria fija, así que el mismo archivo da siempre el mismo resultado; si el ajuste sale pobre (R² log &lt; 0.95) se reintenta con otras semillas y se conserva el mejor. " +
     "El ajuste de modelos fraccionarios es un análisis complementario de la literatura (Miranda-Valdez et al., 2025); no es un procedimiento ASTM.";
   const ok = d.results.filter(r => !r.error), traces = [];
   const names = d.test === "saos" ? (d.modo === "tension" ? ["E′", "E″"] : ["G′", "G″"]) : [d.modo === "tension" ? d.axes[1].split(" ")[0] : ""];
@@ -463,9 +469,13 @@ function show(d, scroll = true) {
     Plotly.relayout("resplot", {"yaxis.autorange":true});
   });
 
-  $("metrics").innerHTML = `<table><tr><th>Modelo</th><th>R²</th><th>R² log</th><th>RSS<sub>w</sub></th></tr>` + d.results.map(r => r.error
-    ? `<tr><td>${esc(pretty(r.requested))}</td><td colspan="3">${esc(r.error)}${r.intentos > 1 ? ` <small>(${r.intentos} intentos)</small>` : ""}</td></tr>`
-    : `<tr><td>${esc(pretty(r.model))}${r.requested === "auto" ? " <small>(auto)</small>" : ""}${r.semilla !== undefined ? `<br><small>semilla ${r.semilla}${r.intentos > 1 ? ` · ${r.intentos} intentos` : ""}</small>` : ""}</td><td>${fmt(r.r2)}</td><td>${fmt(r.r2_log)}</td><td>${fmt(r.rss_w)}</td></tr>`).join("") + `</table>`;
+  const T = r => r.todos || {};
+  $("metrics").innerHTML = `<table><tr><th>Modelo</th><th>R²</th><th>R² log</th><th>RSS<sub>w</sub></th>` +
+    `<th title="Error relativo cuadrático medio sobre todas las observaciones válidas">RMS [%]</th><th title="Percentil 95 del error relativo absoluto sobre todas las observaciones válidas">P95 [%]</th></tr>` +
+    d.results.map(r => r.error
+    ? `<tr><td>${esc(pretty(r.requested))}</td><td colspan="5">${esc(r.error)}${r.intentos > 1 ? ` <small>(${r.intentos} intentos)</small>` : ""}</td></tr>`
+    : `<tr><td>${esc(pretty(r.model))}${r.requested === "auto" ? " <small>(auto)</small>" : ""}${r.semilla !== undefined ? `<br><small>semilla ${r.semilla}${r.intentos > 1 ? ` · ${r.intentos} intentos` : ""}</small>` : ""}${(r.avisos || []).length ? `<br><small style="color:var(--acc2)">⚠ ${r.avisos.length === 1 ? "1 aviso" : r.avisos.length + " avisos"} en sus parámetros</small>` : ""}</td>` +
+      `<td>${fmt(r.r2)}</td><td>${fmt(r.r2_log)}</td><td>${fmt(r.rss_w)}</td><td>${fmt(T(r).rms_pct)}</td><td>${fmt(T(r).p95_pct)}</td></tr>`).join("") + `</table>`;
   renderParams(d, ok);
   $("res").hidden = false; if (scroll) $("res").scrollIntoView({behavior:"smooth", block:"start"});
 }
@@ -561,7 +571,8 @@ function renderParams(d, ok) {
     }
     const ml = d.test.match(/creep|relaxation/) && /E_\{/.test(tpl || "") ? "<br><small>E<sub>a,b</sub>(z): función de Mittag-Leffler, evaluada con el método exacto de Garrappa.</small>" : "";
     return `<div class="pcard" style="--c:${COLORS[k % COLORS.length]}"><h3><span style="color:var(--c)">●</span>${esc(pretty(r.model))}` +
-      `<small>R² log ${fmt(r.r2_log)} · RSS<sub>w</sub> ${fmt(r.rss_w)}</small></h3>${eq}` +
+      `<small>R² log ${fmt(r.r2_log)} · RSS<sub>w</sub> ${fmt(r.rss_w)}${r.todos ? ` · RMS ${fmt(r.todos.rms_pct)} %` : ""}</small></h3>` +
+      ((r.avisos || []).length ? `<div class="msg err" style="margin:6px 0">${r.avisos.map(a => "⚠ " + esc(a)).join("<br>")}</div>` : "") + `${eq}` +
       `<div class="scroll"><table><tr><th>Parámetro</th><th>Valor</th>${tens ? "<th>Unidades</th>" : ""}<th>Significado</th></tr>${rows}${der}</table></div>${ml}</div>`;
   }).join("");
   $("params").innerHTML = `<div class="pcards">${cards}</div><small>En negritas: órdenes fraccionarios y propiedades con significado físico directo (módulos, viscosidades, esfuerzo de cedencia, índice de flujo). ` +
@@ -634,11 +645,12 @@ function fitJson(d) {
       errores:k.errors || []};
   }
   else o = {...base, configuracion:d.settings || null, ejes:d.axes || AXES[d.test], puntos_ajustados:d.n, puntos_validos:d.n_raw, nota:d.note || "",
-    datos:{x:d.x, y:d.ys},
+    ponderacion:d.weighting || null, datos:{x:d.x, y:d.ys, observaciones_por_intervalo:d.counts || null},
     resultados:d.results.map(r => r.error ? {modelo_solicitado:r.requested, error:r.error}
       : {modelo_solicitado:r.requested, modelo:r.model, parametros:r.params, r2:r.r2, r2_log:r.r2_log, rss_w:r.rss_w, curva:{x:r.curve_x, y:r.curve_y},
          residuos_pct:{definicion:"(dato - modelo) / dato x 100, en cada x de datos", valores:r.resid || null},
-         semilla:r.semilla ?? null, intentos:r.intentos ?? null, semillas_probadas:r.semillas_probadas || null})};
+         semilla:r.semilla ?? null, intentos:r.intentos ?? null, semillas_probadas:r.semillas_probadas || null,
+         metricas_todas_las_observaciones:r.todos || null, avisos:r.avisos || [], metodo_que_gano:r.inicio || null, mittag_leffler:r.mittag_leffler || null})};
   // con sangría, pero cada lista de números en una sola línea
   return JSON.stringify(o, null, 2).replace(/\[[\s\d.eE+,\-]*?\]/g, m => m.replace(/\s+/g, " ").replace("[ ", "[").replace(" ]", "]")).replace(/null,\s+(?=[\d\-n])/g, "null, ");
 }
@@ -725,7 +737,7 @@ function saveMode() {
   ST[mode] = {file, prev:prevData, last, msg:$("msg").innerHTML,
     sel:{sheet:$("sheet").value, sample:$("sample").value, test:$("test").value, xc:$("xc").value, yc:$("yc").value, y2c:$("y2c").value,
       models:[...document.querySelectorAll("#models input:checked")].map(i => i.value), trim:$("trim").checked,
-      secant:$("secant").value, sunit:$("sunit").value, tunit:$("tunit").value}};
+      secant:$("secant").value, sunit:$("sunit").value, tunit:$("tunit").value, wmode:$("wmode").value}};
 }
 
 function applyModeUI() {
@@ -746,7 +758,7 @@ function restoreMode() {
     renderPreview(prevData);
     const v = S.sel;
     if (mode === "fit" && v.test && v.test !== "tension") { $("test").value = v.test; renderModels(); }
-    for (const k of ["sheet", "sample", "xc", "yc", "y2c", "secant", "sunit", "tunit"]) if (v[k]) $(k).value = v[k];
+    for (const k of ["sheet", "sample", "xc", "yc", "y2c", "secant", "sunit", "tunit", "wmode"]) if (v[k]) $(k).value = v[k];
     $("trim").checked = v.trim;
     document.querySelectorAll("#models input").forEach(i => i.checked = v.models.includes(i.value));
   }
