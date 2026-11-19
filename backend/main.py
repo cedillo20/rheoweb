@@ -202,6 +202,28 @@ def thin(data, xcol, n=MAX_POINTS):
     return data.iloc[idx]
 
 
+def log_bin(data, xcol, ycols, n=MAX_POINTS):
+    """Promedia TODAS las observaciones en n intervalos de igual ancho en log10(x).
+    Devuelve (tabla de promedios, número de observaciones por intervalo). x se promedia geométricamente.
+    Con anchos de intervalo pequeños (~60 por década) el sesgo de promediar una curva suave es despreciable."""
+    if len(data) <= n:
+        return data.reset_index(drop=True), np.ones(len(data))
+    x = data[xcol].to_numpy(float)
+    edges = np.logspace(np.log10(x.min()), np.log10(x.max()), n + 1)
+    b = np.clip(np.searchsorted(edges, x, side="right") - 1, 0, n - 1)
+    g = pd.DataFrame({"b": b, "lx": np.log(x), **{c: data[c].to_numpy(float) for c in ycols}}).groupby("b")
+    out = g.mean()
+    res = pd.DataFrame({xcol: np.exp(out["lx"].to_numpy()), **{c: out[c].to_numpy() for c in ycols}})
+    return res, g.size().to_numpy().astype(float)
+
+
+WEIGHTING = {
+    "decada": "igual peso por década: cada intervalo logarítmico cuenta lo mismo, sin importar cuántas observaciones tenga",
+    "todos": "todas las observaciones: cada intervalo pesa según cuántas observaciones promedia; equivale "
+             "aproximadamente a ajustar cada fila con la pérdida de pyRheo",
+}
+
+
 # ---------------------------------------------------------------- endpoints
 @app.get("/api/status")
 def status():
@@ -222,9 +244,11 @@ async def preview(file: UploadFile = File(...), sheet: str = Form(""), sample: s
 @app.post("/api/fit")
 async def fit(file: UploadFile = File(...), test: str = Form(...), x_col: str = Form(...),
               y_col: str = Form(...), y2_col: str = Form(""), models: str = Form(...),
-              sheet: str = Form(""), sample: str = Form(""), trim: str = Form("0")):
+              sheet: str = Form(""), sample: str = Form(""), trim: str = Form("0"), weighting: str = Form("decada")):
     if test not in ("creep", "relaxation", "saos", "steady"):
         raise HTTPException(400, "Tipo de ensayo no válido.")
+    if weighting not in WEIGHTING:
+        raise HTTPException(400, "Ponderación no válida.")
     tb = load_table(file, await file.read(), sheet, sample)
     df = tb["df"]
     ramp = None
@@ -245,13 +269,25 @@ async def fit(file: UploadFile = File(...), test: str = Form(...), x_col: str = 
     if len(data) < 5:
         raise HTTPException(400, "Quedaron menos de 5 puntos válidos (positivos y numéricos).")
     n_raw = len(data)
-    data = thin(data, x_col)
-    x = data[x_col].to_numpy(float)
-    ys = [data[c].to_numpy(float) for c in cols[1:]]
-    results = run_fit(test, x, ys, json.loads(models))
+    x_all = data[x_col].to_numpy(float)
+    ys_all = [data[c].to_numpy(float) for c in cols[1:]]
+    binned, counts = log_bin(data, x_col, cols[1:])
+    x = binned[x_col].to_numpy(float)
+    ys = [binned[c].to_numpy(float) for c in cols[1:]]
+    w = counts / counts.mean() if weighting == "todos" else np.ones_like(counts)
+    results = run_fit(test, x, ys, json.loads(models), w=w, x_all=x_all, ys_all=ys_all)
 
-    resp = {"n": len(x), "n_raw": n_raw, "x": x.tolist(), "ys": [y.tolist() for y in ys], "results": results, "pyrheo": PYRHEO,
-            "settings": {**fit_settings(test), "max_puntos_ajuste": MAX_POINTS, "muestreo": "logarítmico en x", "filtro": "solo valores positivos"}}
+    decades = float(np.log10(x_all.max() / x_all.min())) if len(x_all) > 1 else 0.0
+    reduction = (f"Se promediaron las {n_raw} observaciones en {len(x)} intervalos logarítmicos "
+                 f"(~{len(x) / decades:.0f} por década); " if len(x) < n_raw else f"Se usaron las {n_raw} observaciones; ")
+    resp = {"n": len(x), "n_raw": n_raw, "x": x.tolist(), "ys": [y.tolist() for y in ys], "counts": counts.tolist(),
+            "results": results, "pyrheo": PYRHEO, "weighting": weighting,
+            "settings": {**fit_settings(test), "intervalos_logaritmicos": len(x), "observaciones": n_raw,
+                         "reduccion": "promedio de todas las observaciones dentro de cada intervalo de igual ancho en log10(x)",
+                         "ponderacion": WEIGHTING[weighting], "filtro": "solo valores positivos",
+                         "metricas_todos": "RMS relativo y percentil 95 del error relativo absoluto sobre TODAS las observaciones válidas"}}
+    weight_txt = ("ponderación: igual peso por década. " if weighting == "decada" else
+                  "ponderación: todas las observaciones (cada intervalo pesa según cuántas promedia). ")
     if tb["fime"] and test in ("creep", "relaxation"):
         resp["modo"] = "tension"
         resp["axes"] = ["t [s]", "D(t) [1/MPa]" if test == "creep" else "E(t) [MPa]"]
@@ -263,10 +299,11 @@ async def fit(file: UploadFile = File(...), test: str = Form(...), x_col: str = 
                         ("D(t) = Deformación/Tensión, complianza de creep en tensión, en 1/MPa. " if test == "creep" else
                          "E(t) = Tensión/Deformación, módulo de relajación en tensión, en MPa. ") +
                         "pyRheo llama G a sus parámetros de módulo; aquí son módulos de tensión. " +
-                        f"Se ajustaron {len(x)} de {n_raw} puntos (muestreo logarítmico).")
+                        reduction + weight_txt)
     else:
         # archivos genéricos: no se suponen unidades; los ejes llevan el nombre de las columnas
         resp["axes"] = [x_col, f"{y_col} / {y2_col}" if test == "saos" else y_col]
+        resp["note"] = reduction + weight_txt
     return resp
 
 
