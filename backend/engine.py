@@ -4,6 +4,11 @@ Dos rutas:
   1) pyRheo real (si se puede importar). Ver `_fit_pyrheo` y la sección VERIFICAR.
   2) Respaldo con SciPy (modelos clásicos simples) para probar la página sin pyRheo.
 """
+import os
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 from scipy.optimize import least_squares, minimize
 
@@ -235,7 +240,7 @@ def fit_settings(test):
                        " y se conserva el intento de menor RSS_w. La semilla de cada modelo se reporta en sus resultados: con el "
                        "mismo archivo y configuración el ajuste es idéntico. El optimizador es local: un R² log bajo puede ser un "
                        "mínimo local y no una limitación del modelo; los residuos ayudan a distinguirlo.",
-         "limite_por_modelo_s": MODEL_TIMEOUT}
+         "limite_por_modelo_s": MODEL_TIMEOUT, "limite_por_solicitud_s": TOTAL_BUDGET, "ajustes_en_paralelo": PARALLEL}
     if test in ("creep", "relaxation"):
         s["mittag_leffler"] = (f"la optimización usa la aproximación {ML_FIT}; curvas, métricas y residuos se calculan con el método "
                                f"exacto ({ML_EXACT}). Si ambos difieren más de {ML_TOL * 100:g} % en los datos, los parámetros se "
@@ -385,8 +390,41 @@ def _worker(conn, test, name, x, y, xd, seed, n_guesses, w, x_all, y_all):
         conn.close()
 
 
-MODEL_TIMEOUT = 30   # segundos por intento; los modelos de 5-6 parametros pueden no terminar nunca
-TOTAL_BUDGET = 80    # segundos por solicitud (Render corta las peticiones largas)
+def _env_float(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return float(default)
+
+
+# Límites configurables con variables de entorno (en Railway: Variables del servicio).
+# Los ajustes que nunca terminan (p. ej. Zener fraccionario de 6 parámetros en creep) se cortan aunque sobre CPU.
+MODEL_TIMEOUT = _env_float("SPRINGPLOT_MODEL_TIMEOUT", 90)    # segundos por intento de cada modelo
+TOTAL_BUDGET = _env_float("SPRINGPLOT_TOTAL_BUDGET", 240)     # segundos por solicitud completa
+# Procesos de ajuste simultáneos en TODO el servidor (todas las solicitudes juntas). Ponerlo igual al número de
+# vCPU del plan; no se usa os.cpu_count() porque en contenedores reporta los núcleos del equipo anfitrión.
+PARALLEL = max(1, int(_env_float("SPRINGPLOT_PARALLEL", 2)))
+_SLOTS = threading.BoundedSemaphore(PARALLEL)
+_CTX = None
+_CTX_LOCK = threading.Lock()
+
+
+def _mp_context():
+    """Contexto de multiprocessing seguro con hilos: 'forkserver' en Linux (hacer fork desde un proceso con varios
+    hilos puede bloquearse) y 'spawn' en Windows. SPRINGPLOT_MP_START permite forzar otro ('spawn', 'fork')."""
+    global _CTX
+    import multiprocessing as mp
+    with _CTX_LOCK:
+        if _CTX is None:
+            method = os.environ.get("SPRINGPLOT_MP_START") or ("forkserver" if sys.platform.startswith("linux") else "spawn")
+            ctx = mp.get_context(method)
+            if method == "forkserver":
+                try:
+                    ctx.set_forkserver_preload(["engine"])  # pyRheo, SciPy y NumPy se cargan una sola vez
+                except Exception:  # noqa
+                    pass
+            _CTX = ctx
+    return _CTX
 # Intentos (semilla de numpy.random, número de valores iniciales aleatorios): el primero siempre; los demás solo
 # si el ajuste sale pobre. El optimizador de pyRheo es local: con más valores iniciales es más probable hallar el
 # mínimo global (en relajación, Zener sólido S pasó de R² log 0.82 con 16 a 0.995 con 64).
@@ -396,9 +434,24 @@ RETRY_R2_LOG = 0.95  # si R2 log < este valor se reintenta con la siguiente semi
 
 
 def _attempt(test, name, x, y, xd, seed, n_guesses, limit, w=None, x_all=None, y_all=None):
-    import multiprocessing as mp
-    parent, child = mp.Pipe(duplex=False)
-    p = mp.Process(target=_worker, args=(child, test, name, x, y, xd, seed, n_guesses, w, x_all, y_all), daemon=True)
+    import time
+    t0 = time.time()
+    # espera un lugar libre (límite global de procesos); el tiempo de espera cuenta contra el presupuesto
+    if not _SLOTS.acquire(timeout=max(limit, 0.1)):
+        return {"requested": name, "error": "Servidor ocupado con otros ajustes; intenta de nuevo en un momento."}
+    try:
+        left = limit - (time.time() - t0)
+        if left < 1:
+            return {"requested": name, "error": "Omitido: se agotó el tiempo esperando un lugar libre en el servidor."}
+        return _run_process(test, name, x, y, xd, seed, n_guesses, left, w, x_all, y_all)
+    finally:
+        _SLOTS.release()
+
+
+def _run_process(test, name, x, y, xd, seed, n_guesses, limit, w, x_all, y_all):
+    ctx = _mp_context()
+    parent, child = ctx.Pipe(duplex=False)
+    p = ctx.Process(target=_worker, args=(child, test, name, x, y, xd, seed, n_guesses, w, x_all, y_all), daemon=True)
     p.start()
     child.close()
     if parent.poll(limit):
@@ -423,8 +476,9 @@ def run_fit(test, x, ys, models, w=None, x_all=None, ys_all=None):
     w = None if w is None else (np.concatenate([w, w]) if test == "saos" else np.asarray(w, float))
     y_all = None if ys_all is None else np.concatenate(ys_all)
     xd = np.logspace(np.log10(x.min()), np.log10(x.max()), 200)
-    out, t_start = [], time.time()
-    for name in models:
+    t_start = time.time()
+
+    def one(name):
         best, tried = None, []
         for seed, n_guesses in ATTEMPTS:
             left = TOTAL_BUDGET - (time.time() - t_start)
@@ -437,7 +491,7 @@ def run_fit(test, x, ys, models, w=None, x_all=None, ys_all=None):
             if "error" in res:
                 if best is None:
                     best = res
-                if "Tardó" in res["error"] or not PYRHEO:
+                if "Tardó" in res["error"] or "ocupado" in res["error"] or not PYRHEO:
                     break          # si un intento no termina a tiempo, los demás tampoco lo harán
                 continue
             if best is None or "error" in best or res["rss_w"] < best["rss_w"]:
@@ -446,6 +500,9 @@ def run_fit(test, x, ys, models, w=None, x_all=None, ys_all=None):
                 break
         best["intentos"] = len(tried)
         best["semillas_probadas"] = tried
-        out.append(best)
+        return best
+
+    with ThreadPoolExecutor(max_workers=max(1, min(PARALLEL, len(models)))) as pool:
+        out = list(pool.map(one, models))
     out.sort(key=lambda r: r.get("rss_w", float("inf")))
     return out
