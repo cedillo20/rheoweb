@@ -81,6 +81,77 @@ def test_ajuste_reproducible():
     assert a["r2_log"] > 0.999
 
 
+def _fit_full(test, t, y, models, **extra):
+    r = client.post("/api/fit", files={"file": ("s.csv", _csv(t=t, y=y))},
+                    data={"test": test, "x_col": "t", "y_col": "y", "models": json.dumps(models), "trim": "0", **extra})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_viscosidad_fuera_de_los_limites_de_pyrheo():
+    # auditoría: pyRheo acota eta_s al rango de 1/J (unidades de módulo); con eta_s = 6e5 quedaba en el límite
+    t = np.logspace(0, 3, 120)
+    p = {"G": 18.0, "eta_s": 6e5, "beta": 0.065}
+    res = _fit("creep", t, engine.model_eval("creep", "FractionalMaxwellLiquid", p, t), "FractionalMaxwellLiquid")
+    for k, v in p.items():
+        assert res["params"][k] == pytest.approx(v, rel=1e-3)
+
+
+def test_maxwell_fraccionario_relajacion_con_tau_lejano():
+    # tau = (V/G)^(1/(alpha-beta)) ~ 4e5 s, muy fuera de la ventana medida
+    t = np.logspace(0, 3, 120)
+    p = {"G": 18.0, "V": 400.0, "alpha": 0.3, "beta": 0.06}
+    res = _fit("relaxation", t, engine.model_eval("relaxation", "FractionalMaxwell", p, t), "FractionalMaxwell")
+    for k, v in p.items():
+        assert res["params"][k] == pytest.approx(v, rel=1e-3)
+
+
+def test_springpots_intercambiables_se_reportan_con_alpha_mayor():
+    import engine as E
+    p = E._normalize("FractionalMaxwell", {"G": 400.0, "V": 18.0, "alpha": 0.06, "beta": 0.3})
+    assert p == {"G": 18.0, "V": 400.0, "alpha": 0.3, "beta": 0.06}
+    t = np.logspace(0, 3, 30)
+    a = E.model_eval("relaxation", "FractionalMaxwell", {"G": 18.0, "V": 400.0, "alpha": 0.3, "beta": 0.06}, t)
+    b = E.model_eval("relaxation", "FractionalMaxwell", {"G": 400.0, "V": 18.0, "alpha": 0.06, "beta": 0.3}, t)
+    assert np.allclose(a, b, rtol=1e-6)
+
+
+def test_avisos_de_parametros_no_determinados():
+    import engine as E
+    t = np.logspace(0, 3, 30)
+    assert any("α ≈ β" in a for a in E._diagnostics("creep", "FractionalMaxwell", {"G": 9, "V": 9, "alpha": 0.068, "beta": 0.0679}, t))
+    assert any("τ" in a for a in E._diagnostics("relaxation", "FractionalMaxwellLiquid", {"G": 18.0, "eta_s": 2.6e9, "beta": 0.07}, t))
+    assert E._diagnostics("relaxation", "FractionalMaxwellGel", {"G_s": 18.0, "V": 100.0, "alpha": 0.25}, t) == []
+
+
+def test_cross_sin_parametro_a():
+    g = np.logspace(-2, 3, 50)
+    p = {"eta_inf": 0.01, "eta_zero": 40.0, "k": 0.5, "n": 0.8}
+    res = _fit("steady", g, engine.model_eval("steady", "Cross", p, g), "Cross")
+    assert "a" not in res["params"]
+    for k, v in p.items():
+        assert res["params"][k] == pytest.approx(v, rel=1e-3)
+
+
+@pytest.mark.parametrize("weighting", ["decada", "todos"])
+def test_promedios_por_intervalo_y_metricas_sobre_todos_los_datos(weighting):
+    t = np.linspace(0.5, 600, 20000)   # adquisición uniforme en tiempo, como los equipos de FIME
+    y = engine.model_eval("relaxation", "SpringPot", {"V": 50.0, "alpha": 0.2}, t)
+    d = _fit_full("relaxation", t, y, ["SpringPot"], weighting=weighting)
+    assert d["n_raw"] == 20000 and d["n"] <= 150 and sum(d["counts"]) == 20000
+    assert d["weighting"] == weighting
+    r = d["results"][0]
+    assert r["todos"]["n"] == 20000 and r["todos"]["rms_pct"] < 0.01
+    assert r["params"]["alpha"] == pytest.approx(0.2, rel=1e-3)
+
+
+def test_ponderacion_invalida():
+    t = np.logspace(0, 2, 20)
+    r = client.post("/api/fit", files={"file": ("s.csv", _csv(t=t, y=t))},
+                    data={"test": "creep", "x_col": "t", "y_col": "y", "models": '["SpringPot"]', "weighting": "otra"})
+    assert r.status_code == 400
+
+
 # ------------------------------------------------------------------ teoría de los modelos
 def _interconversion(model, p, t):
     g = lambda u: engine.model_eval("relaxation", model, p, [u])[0]
