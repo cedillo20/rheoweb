@@ -231,8 +231,8 @@ def status():
 
 
 @app.post("/api/preview")
-async def preview(file: UploadFile = File(...), sheet: str = Form(""), sample: str = Form("")):
-    tb = load_table(file, await file.read(), sheet, sample)
+def preview(file: UploadFile = File(...), sheet: str = Form(""), sample: str = Form("")):
+    tb = load_table(file, file.file.read(), sheet, sample)
     df = tb["df"]
     head = df.head(8).astype(object).where(df.head(8).notna(), None)
     guess = guess_fime(df) if tb["fime"] else guess_columns([str(c) for c in df.columns])
@@ -242,14 +242,14 @@ async def preview(file: UploadFile = File(...), sheet: str = Form(""), sample: s
 
 
 @app.post("/api/fit")
-async def fit(file: UploadFile = File(...), test: str = Form(...), x_col: str = Form(...),
+def fit(file: UploadFile = File(...), test: str = Form(...), x_col: str = Form(...),
               y_col: str = Form(...), y2_col: str = Form(""), models: str = Form(...),
               sheet: str = Form(""), sample: str = Form(""), trim: str = Form("0"), weighting: str = Form("decada")):
     if test not in ("creep", "relaxation", "saos", "steady"):
         raise HTTPException(400, "Tipo de ensayo no válido.")
     if weighting not in WEIGHTING:
         raise HTTPException(400, "Ponderación no válida.")
-    tb = load_table(file, await file.read(), sheet, sample)
+    tb = load_table(file, file.file.read(), sheet, sample)
     df = tb["df"]
     ramp = None
     if tb["fime"] and test in ("creep", "relaxation") and trim == "1":
@@ -308,7 +308,7 @@ async def fit(file: UploadFile = File(...), test: str = Form(...), x_col: str = 
 
 
 @app.post("/api/tensile")
-async def tensile(file: UploadFile = File(...), sheet: str = Form(""), x_col: str = Form(""), y_col: str = Form(""),
+def tensile(file: UploadFile = File(...), sheet: str = Form(""), x_col: str = Form(""), y_col: str = Form(""),
                   secant: float = Form(1.0), strain_unit: str = Form("pct"), stress_unit: str = Form("MPa")):
     """Ensayo de tensión analizado según ASTM D638-14 (ver tensile.py). No usa pyRheo.
     Internamente todo se calcula con deformación en % y esfuerzo en MPa; los archivos FIME ya vienen así y en
@@ -319,7 +319,7 @@ async def tensile(file: UploadFile = File(...), sheet: str = Form(""), x_col: st
     STRESS = {"MPa": 1.0, "kPa": 1e-3, "Pa": 1e-6}
     if strain_unit not in STRAIN or stress_unit not in STRESS:
         raise HTTPException(400, "Unidades no válidas.")
-    tb = load_table(file, await file.read(), sheet, "")
+    tb = load_table(file, file.file.read(), sheet, "")
     series = {}
     if tb["fime"]:
         for label, d in tb["all"].items():
