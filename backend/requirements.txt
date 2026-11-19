@@ -1,13 +1,18 @@
-fastapi>=0.110
-uvicorn[standard]>=0.29
-python-multipart>=0.0.9
-pandas>=2.0
-openpyxl>=3.1
-xlrd>=2.0
-numpy
-scipy
-mpmath
-scikit-optimize
-scikit-learn
-matplotlib
-pyRheo @ git+https://github.com/mirandi1/pyRheo.git
+# Versiones fijas: son las probadas con Python 3.12.10 (las 17 pruebas de tests/ pasan con ellas).
+# Para actualizar, cambia una versión, corre las pruebas y solo entonces sube el cambio.
+fastapi==0.162.6
+uvicorn[standard]==0.54.0
+python-multipart==0.0.33
+pandas==3.1.1
+openpyxl==3.1.5
+xlrd>=2.0,<3
+numpy==2.5.4
+scipy==1.18.1
+mpmath==1.4.1
+scikit-optimize==0.10.2
+scikit-learn==1.9.1
+matplotlib==3.11.2
+joblib==1.6.0
+# pyRheo fijado a un commit (no se instala con git: se descarga el zip de ese commit).
+# Las correcciones de engine.py están verificadas contra este commit (pyRheo 1.0.3).
+pyRheo @ https://github.com/mirandi1/pyRheo/archive/9435084aa64c3a59039137227f48127bee384f36.zip
