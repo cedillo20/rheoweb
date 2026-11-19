@@ -47,7 +47,7 @@ label{display:block;font-weight:500;margin:12px 0 4px}
 select,input[type=file],input[type=number]{width:100%;padding:8px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--ink);font:inherit}
 .drop{border:1.5px dashed var(--acc);border-radius:6px;padding:16px;text-align:center;color:var(--mute);cursor:pointer}
 .drop.on{background:color-mix(in srgb,var(--acc) 10%,transparent)}
-.models{display:grid;gap:2px}.models label{font-weight:400;margin:0;display:flex;gap:8px;align-items:center}
+.models{display:grid;gap:2px}.models .recopt{padding:6px 8px;margin-bottom:4px;border:1px solid var(--acc);border-radius:4px;background:color-mix(in srgb,var(--acc) 8%,#fff)}.models label{font-weight:400;margin:0;display:flex;gap:8px;align-items:center}
 button{font:600 15px "Public Sans";padding:10px 16px;border-radius:4px;border:1px solid var(--acc);background:var(--acc);color:var(--bg);cursor:pointer}
 button:hover{filter:brightness(.92)}
 button.ghost{background:transparent;color:var(--acc)}
@@ -272,6 +272,8 @@ const fitLast = () => mode === "fit" ? last : ST.fit.last;
 
 const esc = s => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const fmt = v => (v === null || v === undefined || Number.isNaN(v)) ? "—" : (Math.abs(v) >= 1e4 || (Math.abs(v) < 1e-2 && v !== 0) ? v.toExponential(3) : Number(v.toPrecision(4)).toString());
+// R² con los decimales necesarios: 0.99997 no debe verse como «1»
+const r2f = v => (v === null || v === undefined || !isFinite(v)) ? "—" : v >= 0.9999 && v < 1 ? v.toFixed(Math.min(8, 1 - Math.floor(Math.log10(1 - v)))) : fmt(v);
 const note = (t, k="info") => $("msg").innerHTML = t ? `<div class="msg ${k}">${esc(t)}</div>` : "";
 const noteHtml = (h, k="info") => $("msg").innerHTML = `<div class="msg ${k}">${h}</div>`;
 
@@ -283,7 +285,17 @@ function renderModels() {
   const t = $("test").value, list = (status && status.models[t]) || [];
   $("mlab").hidden = $("models").hidden = t === "tension";
   $("run").textContent = t === "tension" ? "Analizar" : "Ajustar";
-  $("models").innerHTML = list.map((m, i) => `<label><input type="checkbox" value="${m}" ${i < 2 ? "checked" : ""}> ${esc(pretty(m))}</label>`).join("");
+  const recList = (status && status.recommend_models && status.recommend_models[t]) || [];
+  const shown = list.filter(m => m !== "auto");
+  $("models").innerHTML = (t === "tension" ? "" :
+    `<label class="recopt"><input type="checkbox" id="recall" checked> <b>★ Recomendado</b>: probar todos los modelos y elegir el más simple cuyos parámetros estén determinados</label>`) +
+    shown.map(m => `<label><input type="checkbox" class="mchk" value="${m}" ${recList.includes(m) ? "checked" : ""}> ${esc(pretty(m))}</label>`).join("");
+  if ($("recall")) {
+    $("recall").onchange = () => document.querySelectorAll("#models .mchk").forEach(i => i.checked = $("recall").checked && recList.includes(i.value));
+    document.querySelectorAll("#models .mchk").forEach(i => i.onchange = () => {
+      $("recall").checked = [...document.querySelectorAll("#models .mchk")].every(c => c.checked === recList.includes(c.value));
+    });
+  }
   $("xl").textContent = LABELS[t][0]; $("yl").textContent = LABELS[t][1];
   $("y2w").hidden = t !== "saos"; $("trw").hidden = !(t === "relaxation" || t === "creep"); $("secw").hidden = t !== "tension"; $("wmw").hidden = t === "tension";
   guessCols();
@@ -416,7 +428,7 @@ function renderTension(L, scroll = true) {
 
 $("run").onclick = async () => {
   if ($("test").value === "tension") return runTensile();
-  const models = [...document.querySelectorAll("#models input:checked")].map(i => i.value);
+  const models = [...document.querySelectorAll("#models .mchk:checked")].map(i => i.value);
   if (!models.length) { note("Elige al menos un modelo.", "err"); return; }
   const fd = new FormData(), t = $("test").value;
   fd.append("file", file); fd.append("test", t); fd.append("x_col", $("xc").value);
@@ -470,12 +482,19 @@ function show(d, scroll = true) {
   });
 
   const T = r => r.todos || {};
-  $("metrics").innerHTML = `<table><tr><th>Modelo</th><th>R²</th><th>R² log</th><th>RSS<sub>w</sub></th>` +
+  const order = [...d.results].sort((a, b) => (a.error ? 1 : 0) - (b.error ? 1 : 0) || (b.recomendado ? 1 : 0) - (a.recomendado ? 1 : 0) || (a.bic ?? Infinity) - (b.bic ?? Infinity));
+  const R = d.recomendacion;
+  const recBox = R ? `<div class="msg info" style="margin:0 0 10px"><b>★ Modelo recomendado: ${esc(pretty(R.modelo))}</b> (${R.k} parámetros${R.con_parametros_determinados ? ", todos determinados por tus datos" : ""}).` +
+    (R.siguiente ? ` Le sigue ${esc(pretty(R.siguiente))} con ΔBIC = ${fmt(R.delta_bic_siguiente)}${R.delta_bic_siguiente > 10 ? " (diferencia muy fuerte)" : R.delta_bic_siguiente > 6 ? " (diferencia fuerte)" : R.delta_bic_siguiente > 2 ? " (diferencia positiva)" : " (diferencia débil: ambos son comparables)"}.` : "") +
+    (R.mejor_ajuste_sin_restriccion ? ` ${esc(pretty(R.mejor_ajuste_sin_restriccion))} tiene menor BIC, pero no todos sus parámetros están determinados por los datos.` : "") +
+    (!R.con_parametros_determinados ? " <b>Ningún modelo tiene todos sus parámetros determinados</b>: se recomienda el de menor BIC; interpreta sus parámetros con cautela." : "") +
+    `<br><small>Criterio: ${esc(R.criterio)}. Solo se comparan los modelos que marcaste.</small></div>` : "";
+  $("metrics").innerHTML = recBox + `<table><tr><th>Modelo</th><th title="Diferencia de BIC respecto al recomendado; valores mayores = menos respaldo">ΔBIC</th><th>R²</th><th>R² log</th><th>RSS<sub>w</sub></th>` +
     `<th title="Error relativo cuadrático medio sobre todas las observaciones válidas">RMS [%]</th><th title="Percentil 95 del error relativo absoluto sobre todas las observaciones válidas">P95 [%]</th></tr>` +
-    d.results.map(r => r.error
-    ? `<tr><td>${esc(pretty(r.requested))}</td><td colspan="5">${esc(r.error)}${r.intentos > 1 ? ` <small>(${r.intentos} intentos)</small>` : ""}</td></tr>`
-    : `<tr><td>${esc(pretty(r.model))}${r.requested === "auto" ? " <small>(auto)</small>" : ""}${r.semilla !== undefined ? `<br><small>semilla ${r.semilla}${r.intentos > 1 ? ` · ${r.intentos} intentos` : ""}</small>` : ""}${(r.avisos || []).length ? `<br><small style="color:var(--acc2)">⚠ ${r.avisos.length === 1 ? "1 aviso" : r.avisos.length + " avisos"} en sus parámetros</small>` : ""}</td>` +
-      `<td>${fmt(r.r2)}</td><td>${fmt(r.r2_log)}</td><td>${fmt(r.rss_w)}</td><td>${fmt(T(r).rms_pct)}</td><td>${fmt(T(r).p95_pct)}</td></tr>`).join("") + `</table>`;
+    order.map(r => r.error
+    ? `<tr><td>${esc(pretty(r.requested))}</td><td colspan="6">${esc(r.error)}${r.intentos > 1 ? ` <small>(${r.intentos} intentos)</small>` : ""}</td></tr>`
+    : `<tr><td>${esc(pretty(r.model))}${r.requested === "auto" ? " <small>(auto)</small>" : ""}${r.semilla !== undefined ? `<br><small>semilla ${r.semilla}${r.intentos > 1 ? ` · ${r.intentos} intentos` : ""}</small>` : ""}${r.recomendado ? `<br><small style="color:var(--acc);font-weight:700">★ recomendado</small>` : ""}${r.todos_determinados === false ? `<br><small style="color:var(--acc2)">⚠ parámetros no determinados</small>` : ""}</td>` +
+      `<td>${r.delta_bic === undefined ? "—" : fmt(r.delta_bic)}</td><td>${r2f(r.r2)}</td><td>${r2f(r.r2_log)}</td><td>${fmt(r.rss_w)}</td><td>${fmt(T(r).rms_pct)}</td><td>${fmt(T(r).p95_pct)}</td></tr>`).join("") + `</table>`;
   renderParams(d, ok);
   $("res").hidden = false; if (scroll) $("res").scrollIntoView({behavior:"smooth", block:"start"});
 }
@@ -558,24 +577,35 @@ const tex = (src, display = true) => katexOk() ? katex.renderToString(src, {thro
 function renderParams(d, ok) {
   const tens = d.modo === "tension";
   const lhs = {creep:tens ? "D(t)" : "J(t)", relaxation:tens ? "E(t)" : "G(t)", saos:tens ? "E^{*}(\\omega)" : "G^{*}(\\omega)", steady:"\\eta(\\dot\\gamma)"}[d.test] || "y";
-  const cards = ok.map((r, k) => {
-    const P = r.params, key = `${d.test}:${r.model}`, tpl = EQ[key];
-    const eq = tpl ? `<div class="eq"><span class="lbl">Ecuación del modelo</span>${tex(`${lhs}=${fillEq(tpl, P, false)}`)}</div>
-      <div class="eq"><span class="lbl">Con los parámetros ajustados${r.model === "FractionalZener" && d.test === "creep" ? " (inversión numérica de Laplace)" : ""}</span>${tex(`${lhs}=${fillEq(tpl, P, true)}`)}</div>` : "";
-    const rows = Object.entries(P).map(([n, v]) => `<tr class="${PIMP.has(n) ? "imp" : ""}"><td>${PSYM[n] ? PSYM[n][0] : esc(n)}</td><td>${fmt(v)}</td>` +
-      (tens ? `<td>${punit(r.model, n)}</td>` : "") + `<td>${esc(pdesc(r.model, n))}</td></tr>`).join("");
+  const color = new Map(ok.map((r, k) => [r, COLORS[k % COLORS.length]]));  // mismo color que su curva
+  const sorted = [...ok].sort((a, b) => (b.recomendado ? 1 : 0) - (a.recomendado ? 1 : 0) || (a.bic ?? Infinity) - (b.bic ?? Infinity));
+  const cards = sorted.map(r => {
+    const P = r.params, key = `${d.test}:${r.model}`, tpl = EQ[key], U = r.incertidumbre || {};
+    const allDet = r.todos_determinados !== false;
+    const eq = tpl ? `<div class="eq"><span class="lbl">Ecuación del modelo</span>${tex(`${lhs}=${fillEq(tpl, P, false)}`)}</div>` +
+      (allDet ? `<div class="eq"><span class="lbl">Con los parámetros ajustados${r.model === "FractionalZener" && d.test === "creep" ? " (inversión numérica de Laplace)" : ""}</span>${tex(`${lhs}=${fillEq(tpl, P, true)}`)}</div>`
+              : `<div class="eq"><small>No se muestra la ecuación con valores: algunos parámetros no están determinados por tus datos. La curva ajustada sí es válida dentro del rango medido.</small></div>`) : "";
+    const interval = n => { const u = U[n]; return u && u.inf !== null && u.sup !== null ? `<br><small>IC 95 %: ${fmt(u.inf)} – ${fmt(u.sup)}</small>` : ""; };
+    const rows = Object.entries(P).map(([n, v]) => {
+      const det = !U[n] || U[n].determinado;
+      return `<tr class="${PIMP.has(n) && det ? "imp" : ""}"><td>${PSYM[n] ? PSYM[n][0] : esc(n)}</td>` +
+        (det ? `<td>${fmt(v)}${interval(n)}</td>` : `<td><i style="color:var(--acc2)">no determinado</i></td>`) +
+        (tens ? `<td>${punit(r.model, n)}</td>` : "") + `<td>${esc(pdesc(r.model, n))}${det ? "" : "<br><small>Los datos no fijan su valor: un intervalo de confianza del 95 % abarca valores muy distintos.</small>"}</td></tr>`;
+    }).join("");
     let der = "";
-    if (TAU[r.model] && d.test !== "steady") {
+    if (TAU[r.model] && d.test !== "steady" && allDet) {
       const tv = evalExpr(TAU[r.model], P);
       der = `<tr class="der"><td>τ</td><td>${fmt(tv)}</td>${tens ? "<td>s</td>" : ""}<td>tiempo característico (derivado): ${tex(TAU_TEX[r.model], false)}</td></tr>`;
     }
     const ml = d.test.match(/creep|relaxation/) && /E_\{/.test(tpl || "") ? "<br><small>E<sub>a,b</sub>(z): función de Mittag-Leffler, evaluada con el método exacto de Garrappa.</small>" : "";
-    return `<div class="pcard" style="--c:${COLORS[k % COLORS.length]}"><h3><span style="color:var(--c)">●</span>${esc(pretty(r.model))}` +
-      `<small>R² log ${fmt(r.r2_log)} · RSS<sub>w</sub> ${fmt(r.rss_w)}${r.todos ? ` · RMS ${fmt(r.todos.rms_pct)} %` : ""}</small></h3>` +
+    return `<div class="pcard" style="--c:${color.get(r)}"><h3><span style="color:var(--c)">●</span>${esc(pretty(r.model))}${r.recomendado ? ` <span style="color:var(--acc)">★ recomendado</span>` : ""}` +
+      `<small>R² log ${r2f(r.r2_log)} · RSS<sub>w</sub> ${fmt(r.rss_w)}${r.todos ? ` · RMS ${fmt(r.todos.rms_pct)} %` : ""}</small></h3>` +
       ((r.avisos || []).length ? `<div class="msg err" style="margin:6px 0">${r.avisos.map(a => "⚠ " + esc(a)).join("<br>")}</div>` : "") + `${eq}` +
       `<div class="scroll"><table><tr><th>Parámetro</th><th>Valor</th>${tens ? "<th>Unidades</th>" : ""}<th>Significado</th></tr>${rows}${der}</table></div>${ml}</div>`;
   }).join("");
-  $("params").innerHTML = `<div class="pcards">${cards}</div><small>En negritas: órdenes fraccionarios y propiedades con significado físico directo (módulos, viscosidades, esfuerzo de cedencia, índice de flujo). ` +
+  $("params").innerHTML = `<div class="pcards">${cards}</div><small>IC 95 %: intervalo de confianza aproximado (linealización del ajuste); supone que el modelo reproduce la forma de los datos, así que si los residuos muestran tendencia el intervalo real es más amplio. ` +
+    `«No determinado»: el intervalo abarca más de un factor 2 (módulos y viscosidades) o más de ±0.1 (órdenes), o el parámetro quedó en un límite. ` +
+    `En negritas: órdenes fraccionarios y propiedades con significado físico directo (módulos, viscosidades, esfuerzo de cedencia, índice de flujo). ` +
     `V, G y K de los springpots son cuasi-propiedades: sus unidades dependen del orden fraccionario.` + (tens ? " Ensayo en tensión: los módulos son de tensión aunque pyRheo los nombre G." : " Unidades: las de tus datos.") + `</small>`;
   // si KaTeX aún no termina de cargar, se vuelve a dibujar cuando esté listo
   if (!katexOk()) setTimeout(() => { if (katexOk() && last === d) renderParams(d, ok); }, 800);
@@ -626,8 +656,11 @@ function csvText(d) {
     const [m, rt, ec, dc, er, dr, te] = st("promedio"), [m2, rt2, ec2, dc2, er2, dr2, te2] = st("desv_est");
     rows.push(["promedio", "", m, rt, "", ec, dc, er, dr, te, ""], ["desv_est", "", m2, rt2, "", ec2, dc2, er2, dr2, te2, ""]);
   } else {
-    rows.push(["modelo","parametro","valor","R2","R2_log","RSS_w"]);
-    d.results.filter(r => !r.error).forEach(r => Object.entries(r.params).forEach(([k, v]) => rows.push([r.model, k, v, r.r2, r.r2_log, r.rss_w])));
+    rows.push(["modelo","recomendado","parametro","valor","determinado","IC95_inf","IC95_sup","BIC","delta_BIC","RMS_todos_pct","R2","R2_log","RSS_w"]);
+    d.results.filter(r => !r.error).forEach(r => Object.entries(r.params).forEach(([k, v]) => {
+      const u = (r.incertidumbre || {})[k] || {};
+      rows.push([r.model, r.recomendado ? "si" : "no", k, v, u.determinado === false ? "no" : "si", u.inf ?? "", u.sup ?? "", r.bic ?? "", r.delta_bic ?? "", (r.todos || {}).rms_pct ?? "", r.r2, r.r2_log, r.rss_w]);
+    }));
   }
   return rows.map(r => r.join(",")).join("\n");
 }
@@ -645,12 +678,13 @@ function fitJson(d) {
       errores:k.errors || []};
   }
   else o = {...base, configuracion:d.settings || null, ejes:d.axes || AXES[d.test], puntos_ajustados:d.n, puntos_validos:d.n_raw, nota:d.note || "",
-    ponderacion:d.weighting || null, datos:{x:d.x, y:d.ys, observaciones_por_intervalo:d.counts || null},
+    ponderacion:d.weighting || null, recomendacion:d.recomendacion || null, datos:{x:d.x, y:d.ys, observaciones_por_intervalo:d.counts || null},
     resultados:d.results.map(r => r.error ? {modelo_solicitado:r.requested, error:r.error}
       : {modelo_solicitado:r.requested, modelo:r.model, parametros:r.params, r2:r.r2, r2_log:r.r2_log, rss_w:r.rss_w, curva:{x:r.curve_x, y:r.curve_y},
          residuos_pct:{definicion:"(dato - modelo) / dato x 100, en cada x de datos", valores:r.resid || null},
          semilla:r.semilla ?? null, intentos:r.intentos ?? null, semillas_probadas:r.semillas_probadas || null,
-         metricas_todas_las_observaciones:r.todos || null, avisos:r.avisos || [], metodo_que_gano:r.inicio || null, mittag_leffler:r.mittag_leffler || null})};
+         metricas_todas_las_observaciones:r.todos || null, avisos:r.avisos || [], incertidumbre_IC95:r.incertidumbre || null,
+         todos_los_parametros_determinados:r.todos_determinados ?? null, k:r.k ?? null, BIC:r.bic ?? null, delta_BIC:r.delta_bic ?? null, recomendado:!!r.recomendado, metodo_que_gano:r.inicio || null, mittag_leffler:r.mittag_leffler || null})};
   // con sangría, pero cada lista de números en una sola línea
   return JSON.stringify(o, null, 2).replace(/\[[\s\d.eE+,\-]*?\]/g, m => m.replace(/\s+/g, " ").replace("[ ", "[").replace(" ]", "]")).replace(/null,\s+(?=[\d\-n])/g, "null, ");
 }
@@ -736,7 +770,7 @@ function tab(which) {
 function saveMode() {
   ST[mode] = {file, prev:prevData, last, msg:$("msg").innerHTML,
     sel:{sheet:$("sheet").value, sample:$("sample").value, test:$("test").value, xc:$("xc").value, yc:$("yc").value, y2c:$("y2c").value,
-      models:[...document.querySelectorAll("#models input:checked")].map(i => i.value), trim:$("trim").checked,
+      models:[...document.querySelectorAll("#models .mchk:checked")].map(i => i.value), rec:!!($("recall") && $("recall").checked), trim:$("trim").checked,
       secant:$("secant").value, sunit:$("sunit").value, tunit:$("tunit").value, wmode:$("wmode").value}};
 }
 
@@ -760,7 +794,8 @@ function restoreMode() {
     if (mode === "fit" && v.test && v.test !== "tension") { $("test").value = v.test; renderModels(); }
     for (const k of ["sheet", "sample", "xc", "yc", "y2c", "secant", "sunit", "tunit", "wmode"]) if (v[k]) $(k).value = v[k];
     $("trim").checked = v.trim;
-    document.querySelectorAll("#models input").forEach(i => i.checked = v.models.includes(i.value));
+    document.querySelectorAll("#models .mchk").forEach(i => i.checked = v.models.includes(i.value));
+    if ($("recall")) $("recall").checked = !!v.rec;
   }
   if (last) { if (last.test === "tension") renderTension(last, false); else show(last, false); }
   $("msg").innerHTML = S.msg || "";
@@ -786,7 +821,7 @@ function predSetup() {
   $("pnone").hidden = fits.length > 0; $("pform").hidden = !fits.length;
   if (!fits.length || predFor === fitLast()) return;
   predFor = fitLast(); $("predsec").hidden = true; $("pmsg").innerHTML = ""; PT = PTL(fitLast().modo === "tension");
-  $("pmodel").innerHTML = fits.map((r, i) => `<option value="${i}">${esc(pretty(r.model))} (R² log ${fmt(r.r2_log)})</option>`).join("");
+  $("pmodel").innerHTML = fits.map((r, i) => `<option value="${i}" ${r.recomendado ? "selected" : ""}>${r.recomendado ? "★ " : ""}${esc(pretty(r.model))} (RMS ${fmt((r.todos || {}).rms_pct)} %${r.todos_determinados === false ? ", parámetros no determinados" : ""})</option>`).join("");
   $("ptarget").innerHTML = Object.keys(PT).filter(k => k !== fitLast().test).map(k => `<option value="${k}">${PT[k]}</option>`).join("");
   predRange();
 }
