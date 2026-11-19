@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from typing import Dict
 
 import tensile as tensile_d638
-from engine import IMPORT_ERROR, PYRHEO, available_models, fit_settings, predict_response, run_fit
+from engine import IMPORT_ERROR, PYRHEO, available_models, fit_settings, predict_response, recommend, run_fit
 
 MAX_BYTES = 10 * 1024 * 1024
 MAX_POINTS = 150  # puntos que se mandan al ajuste (muestreo logarítmico); los ensayos largos traen decenas de miles
@@ -227,7 +227,12 @@ WEIGHTING = {
 # ---------------------------------------------------------------- endpoints
 @app.get("/api/status")
 def status():
-    return {"pyrheo": PYRHEO, "import_error": IMPORT_ERROR, "models": {t: available_models(t) for t in ("creep", "relaxation", "saos", "steady")}}
+    # «Recomendado» prueba todos los modelos salvo el automático de pyRheo y el Zener fraccionario de 6 parámetros en
+    # creep (su creep requiere inversión numérica de Laplace y suele exceder el límite de tiempo)
+    rec = {t: [m for m in available_models(t) if m != "auto" and not (t == "creep" and m == "FractionalZener")]
+           for t in ("creep", "relaxation", "saos", "steady")}
+    return {"pyrheo": PYRHEO, "import_error": IMPORT_ERROR, "models": {t: available_models(t) for t in ("creep", "relaxation", "saos", "steady")},
+            "recommend_models": rec}
 
 
 @app.post("/api/preview")
@@ -276,12 +281,13 @@ def fit(file: UploadFile = File(...), test: str = Form(...), x_col: str = Form(.
     ys = [binned[c].to_numpy(float) for c in cols[1:]]
     w = counts / counts.mean() if weighting == "todos" else np.ones_like(counts)
     results = run_fit(test, x, ys, json.loads(models), w=w, x_all=x_all, ys_all=ys_all)
+    recommendation = recommend(results, len(np.concatenate(ys)))
 
     decades = float(np.log10(x_all.max() / x_all.min())) if len(x_all) > 1 else 0.0
     reduction = (f"Se promediaron las {n_raw} observaciones en {len(x)} intervalos logarítmicos "
                  f"(~{len(x) / decades:.0f} por década); " if len(x) < n_raw else f"Se usaron las {n_raw} observaciones; ")
     resp = {"n": len(x), "n_raw": n_raw, "x": x.tolist(), "ys": [y.tolist() for y in ys], "counts": counts.tolist(),
-            "results": results, "pyrheo": PYRHEO, "weighting": weighting,
+            "results": results, "pyrheo": PYRHEO, "weighting": weighting, "recomendacion": recommendation,
             "settings": {**fit_settings(test), "intervalos_logaritmicos": len(x), "observaciones": n_raw,
                          "reduccion": "promedio de todas las observaciones dentro de cada intervalo de igual ancho en log10(x)",
                          "ponderacion": WEIGHTING[weighting], "filtro": "solo valores positivos",
