@@ -62,7 +62,9 @@ th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-
 button.sm{padding:5px 14px;font-size:13.5px}
 .js-plotly-plot .legend .traces, .js-plotly-plot .legendtoggle{cursor:pointer!important}
 small{color:var(--mute)}
-.tabs{display:flex;gap:4px;margin-top:16px}
+.tabs{display:flex;gap:4px;margin-top:16px;overflow-x:auto;scrollbar-width:none}
+.tabs button{white-space:nowrap}
+@media(max-width:520px){.tabs{flex-wrap:wrap}.tabs button{padding:8px 10px}}
 .tabs button{background:transparent;border:0;border-bottom:3px solid transparent;border-radius:0;color:#cfe5d3;padding:10px 14px}
 .tabs button:hover{color:#fff}
 .tabs button.on{color:#fff;border-bottom-color:#fff;background:transparent}
@@ -101,25 +103,25 @@ small{color:var(--mute)}
         <a class="chip" href="https://github.com/mirandi1/pyRheo" target="_blank" rel="noopener">Basado en pyRheo ↗</a>
       </div>
     </div>
-    <div class="tabs"><button id="tabfit" class="on">Ajuste de datos</button><button id="tab3d">Gráficas 3D</button></div>
+    <div class="tabs"><button id="tabfit" class="on">Ajuste de datos</button><button id="tabten">Tensión</button><button id="tabpred">Predicción</button><button id="tab3d">Gráficas 3D</button></div>
   </div>
 </header>
 <main id="vfit">
   <section>
-    <h2>Datos</h2>
+    <h2 id="dh">Datos</h2>
     <div class="drop" id="drop" tabindex="0" role="button">Arrastra un .xlsx o .csv, o haz clic para elegir</div>
     <input type="file" id="file" accept=".xlsx,.xls,.csv" hidden>
     <small id="fname"></small>
     <div id="shw" hidden><label for="sheet">Hoja con los datos</label><select id="sheet"></select></div>
     <div id="smw" hidden><label for="sample">Muestra</label><select id="sample"></select></div>
-    <label for="test">Tipo de ensayo</label>
+    <div id="testw"><label for="test">Tipo de ensayo</label>
     <select id="test">
       <option value="relaxation">Relajación de esfuerzos G(t)</option>
       <option value="creep">Creep J(t)</option>
       <option value="tension">Tensión σ–ε</option>
       <option value="saos">SAOS G′(ω), G″(ω)</option>
       <option value="steady">Flujo estacionario η(γ̇)</option>
-    </select>
+    </select></div>
     <label for="xc" id="xl">Columna de tiempo</label><select id="xc"></select>
     <label for="yc" id="yl">Columna G(t)</label><select id="yc"></select>
     <div id="y2w" hidden><label for="y2c">Columna G″</label><select id="y2c"></select></div>
@@ -163,8 +165,7 @@ small{color:var(--mute)}
   </div>
 </main>
 
-<main id="v3d" hidden>
-  <div class="stack">
+<main id="vpred" hidden>
   <section>
     <h2>Predicción con tu ajuste</h2>
     <small>Usa los parámetros de un modelo ya ajustado para calcular otra respuesta del mismo material, por ejemplo G′(ω) y G″(ω) a partir de un ensayo de creep.</small>
@@ -180,6 +181,16 @@ small{color:var(--mute)}
     </div>
     <div id="pmsg"></div>
   </section>
+  <div class="stack">
+    <section id="predsec" hidden>
+      <h2 id="predh">Predicción</h2>
+      <div id="predplot" style="height:430px"></div>
+      <small id="prednote"></small>
+    </section>
+  </div>
+</main>
+
+<main id="v3d" hidden>
   <section>
     <h2>Modelo fraccionario (dominio de la frecuencia)</h2>
     <small>E* = E(ωτ)<sup>α</sup>j<sup>α</sup> / (1 + (ωτ)<sup>α</sup>j<sup>α</sup>). Con α = 1 se recupera Maxwell.</small>
@@ -204,13 +215,7 @@ small{color:var(--mute)}
     <div class="row"><button id="g3d">Graficar</button></div>
     <div id="gmsg"></div>
   </section>
-  </div>
   <div class="stack">
-    <section id="predsec" hidden>
-      <h2 id="predh">Predicción</h2>
-      <div id="predplot" style="height:430px"></div>
-      <small id="prednote"></small>
-    </section>
     <div id="g3plots"><section><small>Pulsa «Graficar» para generar las superficies 3D del modelo fraccionario.</small></section></div>
   </div>
 </main>
@@ -241,11 +246,17 @@ const LBL = {auto:"Automático (sugerido por pyRheo)", Maxwell:"Maxwell", Spring
   HerschelBulkley:"Herschel-Bulkley", Bingham:"Bingham", PowerLaw:"Ley de potencia",
   CarreauYasuda:"Carreau-Yasuda", Cross:"Cross", Casson:"Casson"};
 const pretty = m => LBL[m] || String(m).replace(/([a-z])([A-Z])/g, "$1 $2");
-let file = null, status = null, last = null, isFime = false;
+let file = null, status = null, last = null, isFime = false, prevData = null;
+// «Ajuste de datos» y «Tensión» comparten el formulario; cada pestaña guarda su propio archivo, vista previa y resultados
+let mode = "fit";
+const ST = {fit:{}, ten:{}};
+const TESTNAME = {relaxation:"relajación", creep:"creep", saos:"SAOS", steady:"flujo estacionario", tension:"tensión"};
+const fitLast = () => mode === "fit" ? last : ST.fit.last;
 
 const esc = s => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const fmt = v => (v === null || v === undefined || Number.isNaN(v)) ? "—" : (Math.abs(v) >= 1e4 || (Math.abs(v) < 1e-2 && v !== 0) ? v.toExponential(3) : Number(v.toPrecision(4)).toString());
 const note = (t, k="info") => $("msg").innerHTML = t ? `<div class="msg ${k}">${esc(t)}</div>` : "";
+const noteHtml = (h, k="info") => $("msg").innerHTML = `<div class="msg ${k}">${h}</div>`;
 
 fetch("/api/status").then(r => r.json()).then(s => { status = s; renderModels();
   if (!s.pyrheo) note("pyRheo no está instalado en el servidor: se usan modelos clásicos de respaldo (Maxwell, SpringPot, etc.).");
@@ -284,14 +295,31 @@ $("file").onchange = e => load(e.target.files[0]);
 
 $("sheet").onchange = () => load(file, $("sheet").value);
 $("sample").onchange = () => load(file, $("sheet").value, $("sample").value);
-async function load(f, sheet, sample) {
+async function load(f, sheet, sample, force = false) {
   if (!f) return;
+  const prevFile = file;
   file = f; $("fname").textContent = f.name; note("");
   const fd = new FormData(); fd.append("file", f); if (sheet) fd.append("sheet", sheet); if (sample) fd.append("sample", sample);
   let r, d;
   try { r = await fetch("/api/preview", {method:"POST", body:fd}); d = await r.json(); }
   catch (e) { note("No pude leer la respuesta del servidor. Si es la primera petición, espera unos segundos y vuelve a intentar.", "err"); return; }
   if (!r.ok) { note(d.detail || "Error al leer el archivo.", "err"); return; }
+  // archivo de la otra pestaña (tensión en «Ajuste de datos» o al revés): se ofrece moverlo y no se toca lo ya cargado
+  const g = d.guess || {}, other = force ? "" : mode === "ten" ? (g.test && g.test !== "tension" ? "fit" : "") : (g.test === "tension" ? "ten" : "");
+  if (other) {
+    file = prevFile; $("fname").textContent = prevFile ? prevFile.name : "";
+    noteHtml(`<b>${esc(f.name)}</b> parece un ensayo de <b>${esc(TESTNAME[g.test])}</b>. ` +
+      `<button class="ghost sm" id="gomode">Abrirlo en «${other === "ten" ? "Tensión" : "Ajuste de datos"}»</button> ` +
+      `<button class="ghost sm" id="gohere">Usarlo aquí</button>`);
+    $("gomode").onclick = () => { $("msg").innerHTML = ""; tab(other); load(f, sheet, sample); };
+    $("gohere").onclick = () => load(f, sheet, sample, true);
+    return;
+  }
+  prevData = d; renderPreview(d);
+}
+
+function renderPreview(d) {
+  $("fname").textContent = file ? file.name : "";
   $("sheet").innerHTML = d.sheets.map(s => `<option ${s === d.sheet ? "selected" : ""}>${esc(s)}</option>`).join("");
   $("shw").hidden = d.sheets.length < 2;
   isFime = d.format === "FIME"; $("unw").hidden = isFime;  // los archivos FIME ya vienen en % y MPa
@@ -299,11 +327,13 @@ async function load(f, sheet, sample) {
   $("smw").hidden = !d.samples || d.samples.length < 2;
   for (const id of ["xc","yc","y2c"]) $(id).innerHTML = d.columns.map(c => `<option>${esc(c)}</option>`).join("");
   const g = d.guess || {};
-  if (g.test) { $("test").value = g.test; }
+  // en «Tensión» el ensayo es fijo; en «Ajuste de datos» se aplica el ensayo detectado (salvo tensión)
+  const fits = mode === "ten" ? (!g.test || g.test === "tension") : g.test !== "tension";
+  if (mode === "ten") $("test").value = "tension"; else if (g.test && fits) $("test").value = g.test;
   renderModels();
-  if (g.x) $("xc").value = g.x; if (g.y) $("yc").value = g.y; if (g.y2) $("y2c").value = g.y2;
+  if (fits) { if (g.x) $("xc").value = g.x; if (g.y) $("yc").value = g.y; if (g.y2) $("y2c").value = g.y2; }
   $("prevt").innerHTML = `<table><tr>${d.columns.map(c => `<th>${esc(c)}</th>`).join("")}</tr>` +
-    d.head.map(r => `<tr>${r.map(v => `<td>${v === null ? "" : esc(v)}</td>`).join("")}</tr>`).join("") + `</table><small>${d.rows} filas de datos${d.format ? " · formato " + esc(d.format) : ""}${g.test ? " · ensayo detectado: " + esc($("test").selectedOptions[0].textContent) : ""}</small>`;
+    d.head.map(r => `<tr>${r.map(v => `<td>${v === null ? "" : esc(v)}</td>`).join("")}</tr>`).join("") + `</table><small>${d.rows} filas de datos${d.format ? " · formato " + esc(d.format) : ""}${g.test ? " · ensayo detectado: " + esc(TESTNAME[g.test]) : ""}</small>`;
   $("prev").hidden = false; $("run").disabled = false;
 }
 
@@ -322,44 +352,49 @@ async function runTensile() {
     const nominal = d.verificaciones.some(c => c.clausula.startsWith("10.3") && c.estado === "aviso");
     const xlab = nominal ? "Deformación nominal [%]" : "Deformación [%]";
     last = {test:"tension", tensile:d.results, d638:d, xlabel:xlab, meta:{archivo:file.name, hoja:$("sheet").value, formato:d.format || "", secante_designada:sec}};
-    $("res").hidden = false; $("resw").hidden = true;
-    const traces = [];
-    d.results.forEach((s, k) => {
-      const c = COLORS[k % COLORS.length];
-      traces.push({x:s.strain, y:s.stress, mode:"lines", name:s.sample, legendgroup:s.sample, line:{color:c, width:2.2}});
-      if (s.cedencia) traces.push({x:[s.cedencia.deformacion], y:[s.cedencia.esfuerzo], mode:"markers", name:`${s.sample} · cedencia`, legendgroup:s.sample, showlegend:false,
-        marker:{symbol:"diamond", size:10, color:c, line:{color:"#fff", width:1}}, hovertemplate:"Cedencia (A2.22)<br>%{y:.3g} MPa · %{x:.3g} %<extra></extra>"});
-      if (s.ruptura.detectada) traces.push({x:[s.ruptura.deformacion], y:[s.ruptura.esfuerzo], mode:"markers", name:`${s.sample} · ruptura`, legendgroup:s.sample, showlegend:false,
-        marker:{symbol:"x", size:10, color:c}, hovertemplate:"Ruptura<br>%{y:.3g} MPa · %{x:.3g} %<extra></extra>"});
-    });
-    Plotly.newPlot("plot", traces, {xaxis:{title:xlab, gridcolor:"#d9e1e7"}, yaxis:{title:AXES.tension[1], gridcolor:"#d9e1e7"},
-      paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:"#17222d"}, margin:{t:10, r:10}, legend:LEG}, {responsive:true});
-    // 11.2 y 11.4: tres cifras significativas; 11.7: desviación estándar con dos
-    // toPrecision conserva los ceros finales (2.90, no 2.9); en notación científica solo si el número es muy grande o muy pequeño
-    const sig = n => v => (v === null || v === undefined || !isFinite(v)) ? "—" : (Math.abs(v) >= 1e5 || (v !== 0 && Math.abs(v) < 1e-3)) ? Number(v).toExponential(n - 1) : Number(v).toPrecision(n);
-    const s3 = sig(3), s2 = sig(2);
-    const sec_ = d.results.some(s => s.modulo.tipo === "secante"), R = d.resumen;
-    const cols = [["Módulo" + (sec_ ? "*" : "") + " [MPa]", s => s.modulo.valor, R.modulo], ["Resistencia a la tensión [MPa]", s => s.resistencia_tension, R.resistencia_tension],
-      ["Esfuerzo en cedencia [MPa]", s => s.cedencia && s.cedencia.esfuerzo, R.esfuerzo_cedencia], ["Deformación en cedencia [%]", s => s.cedencia && s.cedencia.deformacion, R.deformacion_cedencia],
-      ["Esfuerzo a la ruptura [MPa]", s => s.ruptura.esfuerzo, R.esfuerzo_ruptura], [(nominal ? "Deformación nominal" : "Elongación") + " a la ruptura [%]", s => s.ruptura.deformacion, R.deformacion_ruptura],
-      ["Tenacidad† [MJ/m³]", s => s.tenacidad_MJ_m3, R.tenacidad]];
-    $("mh").textContent = "Propiedades en tensión (ASTM D638-14)";
-    $("metrics").innerHTML = `<table><tr><th>Probeta</th>${cols.map(c => `<th>${c[0]}</th>`).join("")}</tr>` +
-      d.results.map(s => `<tr><td>${esc(s.sample)}</td>${cols.map(c => `<td>${s3(c[1](s))}${c[0].startsWith("Resistencia") ? `<br><small>${esc(s.designacion)}</small>` : ""}</td>`).join("")}</tr>`).join("") +
-      `<tr><th>Promedio (11.6)</th>${cols.map(c => `<th>${c[2] ? s3(c[2].promedio) : "—"}</th>`).join("")}</tr>` +
-      `<tr><th>Desv. est. (11.7)</th>${cols.map(c => `<th>${c[2] && c[2].desv_est !== null ? s2(c[2].desv_est) : "—"}</th>`).join("")}</tr></table>`;
-    $("mnote").innerHTML = (sec_ ? `* Módulo secante a ${s3(sec)} % de deformación en las probetas sin porción lineal (11.5). ` : "") +
-      `Deformaciones medidas desde el cero corregido del pie de curva (Anexo A1). † La tenacidad la pide el manual del laboratorio; D638 no la define. ` +
-      (d.errors && d.errors.length ? "No se pudo analizar: " + d.errors.map(e => `${e.sample} (${e.error})`).join("; ") + "." : "");
-    const ico = {ok:"✓", aviso:"⚠", info:"ℹ"}, col = {ok:"var(--acc)", aviso:"var(--acc2)", info:"var(--mute)"};
-    $("ph").textContent = "Verificación contra ASTM D638-14";
-    $("params").innerHTML = `<table>${d.verificaciones.map(c => `<tr><td style="color:${col[c.estado]};font-weight:600;width:1%">${ico[c.estado]}</td>` +
-      `<td style="white-space:nowrap;width:1%">${esc(c.clausula)}</td><td style="white-space:normal">${esc(c.texto)}</td></tr>`).join("")}</table>` +
-      `<details style="margin-top:10px"><summary><small>Reglas numéricas de esta implementación (D638 describe estos pasos de forma gráfica, sin algoritmo)</small></summary>` +
-      `<table>${Object.entries(d.implementacion).map(([k, v]) => `<tr><td style="width:1%">${esc(k.replace(/_/g, " "))}</td><td style="white-space:normal">${esc(v)}</td></tr>`).join("")}</table></details>`;
-    $("res").hidden = false; $("res").scrollIntoView({behavior:"smooth", block:"start"});
+    renderTension(last);
   } catch (e) { note(e.message, "err"); }
   $("run").disabled = false; $("run").textContent = "Analizar";
+}
+
+function renderTension(L, scroll = true) {
+  const d = L.d638, xlab = L.xlabel, sec = L.meta.secante_designada, nominal = /nominal/.test(xlab);
+  $("res").hidden = false; $("resw").hidden = true;
+  const traces = [];
+  d.results.forEach((s, k) => {
+    const c = COLORS[k % COLORS.length];
+    traces.push({x:s.strain, y:s.stress, mode:"lines", name:s.sample, legendgroup:s.sample, line:{color:c, width:2.2}});
+    if (s.cedencia) traces.push({x:[s.cedencia.deformacion], y:[s.cedencia.esfuerzo], mode:"markers", name:`${s.sample} · cedencia`, legendgroup:s.sample, showlegend:false,
+      marker:{symbol:"diamond", size:10, color:c, line:{color:"#fff", width:1}}, hovertemplate:"Cedencia (A2.22)<br>%{y:.3g} MPa · %{x:.3g} %<extra></extra>"});
+    if (s.ruptura.detectada) traces.push({x:[s.ruptura.deformacion], y:[s.ruptura.esfuerzo], mode:"markers", name:`${s.sample} · ruptura`, legendgroup:s.sample, showlegend:false,
+      marker:{symbol:"x", size:10, color:c}, hovertemplate:"Ruptura<br>%{y:.3g} MPa · %{x:.3g} %<extra></extra>"});
+  });
+  Plotly.newPlot("plot", traces, {xaxis:{title:xlab, gridcolor:"#d9e1e7"}, yaxis:{title:AXES.tension[1], gridcolor:"#d9e1e7"},
+    paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:"#17222d"}, margin:{t:10, r:10}, legend:LEG}, {responsive:true});
+  // 11.2 y 11.4: tres cifras significativas; 11.7: desviación estándar con dos
+  // toPrecision conserva los ceros finales (2.90, no 2.9); en notación científica solo si el número es muy grande o muy pequeño
+  const sig = n => v => (v === null || v === undefined || !isFinite(v)) ? "—" : (Math.abs(v) >= 1e5 || (v !== 0 && Math.abs(v) < 1e-3)) ? Number(v).toExponential(n - 1) : Number(v).toPrecision(n);
+  const s3 = sig(3), s2 = sig(2);
+  const sec_ = d.results.some(s => s.modulo.tipo === "secante"), R = d.resumen;
+  const cols = [["Módulo" + (sec_ ? "*" : "") + " [MPa]", s => s.modulo.valor, R.modulo], ["Resistencia a la tensión [MPa]", s => s.resistencia_tension, R.resistencia_tension],
+    ["Esfuerzo en cedencia [MPa]", s => s.cedencia && s.cedencia.esfuerzo, R.esfuerzo_cedencia], ["Deformación en cedencia [%]", s => s.cedencia && s.cedencia.deformacion, R.deformacion_cedencia],
+    ["Esfuerzo a la ruptura [MPa]", s => s.ruptura.esfuerzo, R.esfuerzo_ruptura], [(nominal ? "Deformación nominal" : "Elongación") + " a la ruptura [%]", s => s.ruptura.deformacion, R.deformacion_ruptura],
+    ["Tenacidad† [MJ/m³]", s => s.tenacidad_MJ_m3, R.tenacidad]];
+  $("mh").textContent = "Propiedades en tensión (ASTM D638-14)";
+  $("metrics").innerHTML = `<table><tr><th>Probeta</th>${cols.map(c => `<th>${c[0]}</th>`).join("")}</tr>` +
+    d.results.map(s => `<tr><td>${esc(s.sample)}</td>${cols.map(c => `<td>${s3(c[1](s))}${c[0].startsWith("Resistencia") ? `<br><small>${esc(s.designacion)}</small>` : ""}</td>`).join("")}</tr>`).join("") +
+    `<tr><th>Promedio (11.6)</th>${cols.map(c => `<th>${c[2] ? s3(c[2].promedio) : "—"}</th>`).join("")}</tr>` +
+    `<tr><th>Desv. est. (11.7)</th>${cols.map(c => `<th>${c[2] && c[2].desv_est !== null ? s2(c[2].desv_est) : "—"}</th>`).join("")}</tr></table>`;
+  $("mnote").innerHTML = (sec_ ? `* Módulo secante a ${s3(sec)} % de deformación en las probetas sin porción lineal (11.5). ` : "") +
+    `Deformaciones medidas desde el cero corregido del pie de curva (Anexo A1). † La tenacidad la pide el manual del laboratorio; D638 no la define. ` +
+    (d.errors && d.errors.length ? "No se pudo analizar: " + d.errors.map(e => `${e.sample} (${e.error})`).join("; ") + "." : "");
+  const ico = {ok:"✓", aviso:"⚠", info:"ℹ"}, col = {ok:"var(--acc)", aviso:"var(--acc2)", info:"var(--mute)"};
+  $("ph").textContent = "Verificación contra ASTM D638-14";
+  $("params").innerHTML = `<table>${d.verificaciones.map(c => `<tr><td style="color:${col[c.estado]};font-weight:600;width:1%">${ico[c.estado]}</td>` +
+    `<td style="white-space:nowrap;width:1%">${esc(c.clausula)}</td><td style="white-space:normal">${esc(c.texto)}</td></tr>`).join("")}</table>` +
+    `<details style="margin-top:10px"><summary><small>Reglas numéricas de esta implementación (D638 describe estos pasos de forma gráfica, sin algoritmo)</small></summary>` +
+    `<table>${Object.entries(d.implementacion).map(([k, v]) => `<tr><td style="width:1%">${esc(k.replace(/_/g, " "))}</td><td style="white-space:normal">${esc(v)}</td></tr>`).join("")}</table></details>`;
+  $("res").hidden = false; if (scroll) $("res").scrollIntoView({behavior:"smooth", block:"start"});
 }
 
 $("run").onclick = async () => {
@@ -381,7 +416,7 @@ $("run").onclick = async () => {
   $("run").disabled = false; $("run").textContent = "Ajustar";
 };
 
-function show(d) {
+function show(d, scroll = true) {
   $("res").hidden = false;  // visible antes de dibujar, para que Plotly mida el ancho real del recuadro
   $("mh").textContent = "Comparación de modelos"; $("ph").textContent = "Parámetros";
   $("mnote").innerHTML = "R² lineal puede ser engañoso con datos que abarcan varias décadas; R² log se calcula sobre log₁₀ de los datos. RSS<sub>w</sub> es el residual ponderado que pyRheo minimiza. Cada ajuste usa una semilla aleatoria fija, así que el mismo archivo da siempre el mismo resultado; si el ajuste sale pobre (R² log &lt; 0.95) se reintenta con otras semillas y se conserva el mejor. " +
@@ -420,7 +455,7 @@ function show(d) {
     : `<tr><td>${esc(pretty(r.model))}${r.requested === "auto" ? " <small>(auto)</small>" : ""}${r.semilla !== undefined ? `<br><small>semilla ${r.semilla}${r.intentos > 1 ? ` · ${r.intentos} intentos` : ""}</small>` : ""}</td><td>${fmt(r.r2)}</td><td>${fmt(r.r2_log)}</td><td>${fmt(r.rss_w)}</td></tr>`).join("") + `</table>`;
   $("params").innerHTML = `<table><tr><th>Modelo</th><th>Parámetro</th><th>Valor</th></tr>` + ok.flatMap(r =>
     Object.entries(r.params).map(([k, v]) => `<tr><td>${esc(pretty(r.model))}</td><td>${esc(k)}</td><td>${fmt(v)}</td></tr>`)).join("") + `</table>`;
-  $("res").hidden = false; $("res").scrollIntoView({behavior:"smooth", block:"start"});
+  $("res").hidden = false; if (scroll) $("res").scrollIntoView({behavior:"smooth", block:"start"});
 }
 
 // ---------- Descargas ----------
@@ -566,9 +601,45 @@ $("pyc").onclick = () => {
 
 // ---------- Pestañas ----------
 function tab(which) {
-  $("vfit").hidden = which !== "fit"; $("v3d").hidden = which !== "3d";
-  $("tabfit").classList.toggle("on", which === "fit"); $("tab3d").classList.toggle("on", which === "3d");
-  if (which === "3d") predSetup();  // las superficies 3D se generan solo al pulsar «Graficar» (tardan unos segundos)
+  const data = which === "fit" || which === "ten";
+  $("vfit").hidden = !data; $("vpred").hidden = which !== "pred"; $("v3d").hidden = which !== "3d";
+  ["fit", "ten", "pred", "3d"].forEach(k => $("tab" + k).classList.toggle("on", k === which));
+  if (data && which !== mode) { saveMode(); mode = which; applyModeUI(); restoreMode(); }
+  if (which === "pred") predSetup();
+  // las superficies 3D se generan solo al pulsar «Graficar» (tardan unos segundos)
+}
+
+function saveMode() {
+  ST[mode] = {file, prev:prevData, last, msg:$("msg").innerHTML,
+    sel:{sheet:$("sheet").value, sample:$("sample").value, test:$("test").value, xc:$("xc").value, yc:$("yc").value, y2c:$("y2c").value,
+      models:[...document.querySelectorAll("#models input:checked")].map(i => i.value), trim:$("trim").checked,
+      secant:$("secant").value, sunit:$("sunit").value, tunit:$("tunit").value}};
+}
+
+function applyModeUI() {
+  const ten = mode === "ten", opt = $("test").querySelector('option[value="tension"]');
+  $("testw").hidden = ten; opt.hidden = opt.disabled = !ten;
+  if (ten) $("test").value = "tension"; else if ($("test").value === "tension") $("test").value = "relaxation";
+  $("dh").textContent = ten ? "Datos del ensayo de tensión" : "Datos";
+  renderModels();
+}
+
+function restoreMode() {
+  const S = ST[mode] || {};
+  file = S.file || null; last = S.last || null; prevData = S.prev || null;
+  $("fname").textContent = ""; $("prev").hidden = true; $("res").hidden = true; $("run").disabled = true; $("msg").innerHTML = "";
+  for (const id of ["xc", "yc", "y2c", "sheet", "sample"]) $(id).innerHTML = "";
+  $("shw").hidden = $("smw").hidden = true;
+  if (prevData) {
+    renderPreview(prevData);
+    const v = S.sel;
+    if (mode === "fit" && v.test && v.test !== "tension") { $("test").value = v.test; renderModels(); }
+    for (const k of ["sheet", "sample", "xc", "yc", "y2c", "secant", "sunit", "tunit"]) if (v[k]) $(k).value = v[k];
+    $("trim").checked = v.trim;
+    document.querySelectorAll("#models input").forEach(i => i.checked = v.models.includes(i.value));
+  }
+  if (last) { if (last.test === "tension") renderTension(last, false); else show(last, false); }
+  $("msg").innerHTML = S.msg || "";
 }
 
 // ---------- Predicción con el modelo ajustado ----------
@@ -577,10 +648,10 @@ const PTL = tens => tens ? {saos:"E′(ω) y E″(ω) — oscilación", relaxati
                          : {saos:"G′(ω) y G″(ω) — oscilación", relaxation:"G(t) — relajación", creep:"J(t) — creep"};
 let PT = PTL(false);
 let predFor = null;
-const predFits = () => (last && last.results && PT[last.test]) ? last.results.filter(r => !r.error) : [];
+const predFits = () => (fitLast() && fitLast().results && PT[fitLast().test]) ? fitLast().results.filter(r => !r.error) : [];
 function predRange() {
   // rango por defecto: el que cubre el ensayo (ω ≈ 1/t)
-  const t = $("ptarget").value, src = last.test, xs = last.x, lo = Math.min(...xs), hi = Math.max(...xs);
+  const t = $("ptarget").value, src = fitLast().test, xs = fitLast().x, lo = Math.min(...xs), hi = Math.max(...xs);
   const flip = (t === "saos") !== (src === "saos");
   const a = flip ? 1 / hi : lo, b = flip ? 1 / lo : hi, s = t === "saos" ? "ω" : "t";
   $("pX0").value = Math.floor(Math.log10(a)); $("pX1").value = Math.ceil(Math.log10(b));
@@ -589,10 +660,10 @@ function predRange() {
 function predSetup() {
   const fits = predFits();
   $("pnone").hidden = fits.length > 0; $("pform").hidden = !fits.length;
-  if (!fits.length || predFor === last) return;
-  predFor = last; $("predsec").hidden = true; $("pmsg").innerHTML = ""; PT = PTL(last.modo === "tension");
+  if (!fits.length || predFor === fitLast()) return;
+  predFor = fitLast(); $("predsec").hidden = true; $("pmsg").innerHTML = ""; PT = PTL(fitLast().modo === "tension");
   $("pmodel").innerHTML = fits.map((r, i) => `<option value="${i}">${esc(pretty(r.model))} (R² log ${fmt(r.r2_log)})</option>`).join("");
-  $("ptarget").innerHTML = Object.keys(PT).filter(k => k !== last.test).map(k => `<option value="${k}">${PT[k]}</option>`).join("");
+  $("ptarget").innerHTML = Object.keys(PT).filter(k => k !== fitLast().test).map(k => `<option value="${k}">${PT[k]}</option>`).join("");
   predRange();
 }
 $("ptarget").onchange = predRange;
@@ -607,7 +678,7 @@ $("pred").onclick = async () => {
       body:JSON.stringify({model:fit.model, params:fit.params, target:t, x_min:x0, x_max:x1})}), d = await r.json();
     if (!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : "No se pudo calcular la predicción.");
     // unidades: MPa en archivos FIME; en archivos genéricos no se suponen (son las de los datos)
-    const tens = last.modo === "tension", U = s => tens ? ` [${s}]` : " (unidades de tus datos)", fg = "#17222d", grid = "#d9e1e7", traces = [];
+    const tens = fitLast().modo === "tension", U = s => tens ? ` [${s}]` : " (unidades de tus datos)", fg = "#17222d", grid = "#d9e1e7", traces = [];
     const [n1, n2, nR, nC] = tens ? ["E′", "E″", "E(t)", "D(t)"] : ["G′", "G″", "G(t)", "J(t)"];
     const line = (y, name, color, dash, extra) => traces.push({x:d.x, y, mode:"lines", name, line:{color, width:2.4, dash}, ...extra});
     let ytitle;
@@ -617,7 +688,7 @@ $("pred").onclick = async () => {
       ytitle = `${n1}, ${n2}` + U("MPa");
     } else { line(d.ys[0], t === "creep" ? nC : nR, COLORS[0], "solid"); ytitle = (t === "creep" ? nC + U("1/MPa") : nR + U("MPa")); }
     // ventana que cubre el ensayo (ω ≈ 1/t): fuera de ella la curva es extrapolación
-    const flip = (t === "saos") !== (last.test === "saos"), lo = Math.min(...last.x), hi = Math.max(...last.x);
+    const flip = (t === "saos") !== (fitLast().test === "saos"), lo = Math.min(...fitLast().x), hi = Math.max(...fitLast().x);
     const win = flip ? [1 / hi, 1 / lo] : [lo, hi], vals = d.ys.slice(0, t === "saos" ? 2 : 1).flat().filter(v => v), ymin = Math.min(...vals), ymax = Math.max(...vals);
     win.forEach((w, i) => traces.push({x:[w, w], y:[ymin, ymax], mode:"lines", name:"Rango cubierto por el ensayo", legendgroup:"win", showlegend:i === 0,
       line:{color:"#8a97a3", width:1.5, dash:"dashdot"}, hoverinfo:"skip"}));
@@ -627,14 +698,15 @@ $("pred").onclick = async () => {
       yaxis2:{type:"log", title:"tan δ", overlaying:"y", side:"right", color:fg, showgrid:false},
       paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:fg}, margin:{t:10, r:t === "saos" ? 60 : 10}, legend:LEG}, {responsive:true});
     $("predh").textContent = `Predicción: ${PT[t]}`;
-    $("prednote").textContent = `Modelo ${pretty(fit.model)} ajustado a ${PT[last.test].split(" — ")[1]} (` +
+    $("prednote").textContent = `Modelo ${pretty(fit.model)} ajustado a ${PT[fitLast().test].split(" — ")[1]} (` +
       Object.entries(fit.params).map(([k, v]) => `${k} = ${fmt(v)}`).join(", ") +
       `). Es una predicción del modelo, no una medición: entre las líneas grises corresponde al rango de tiempos del ensayo (ω ≈ 1/t); fuera de ellas es extrapolación.`;
     $("predsec").hidden = false;
   } catch (e) { perr(e.message); }
   $("pred").disabled = false;
 };
-$("tabfit").onclick = () => tab("fit"); $("tab3d").onclick = () => tab("3d");
+["fit", "ten", "pred", "3d"].forEach(k => $("tab" + k).onclick = () => tab(k));
+applyModeUI();
 
 // ---------- Gráficas 3D: modelo fraccionario del pizarrón ----------
 // x = (ωτ)^α ; c = cos(πα/2) ; s = sen(πα/2)
