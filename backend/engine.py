@@ -308,6 +308,100 @@ def _diagnostics(test, model, params, x):
     return out
 
 
+# Criterios de "parámetro determinado" (intervalo de confianza del 95 %, aproximación lineal)
+DET_FACTOR = 2.0   # módulos, viscosidades, cuasi-propiedades: el intervalo no puede abarcar más de un factor 2 a cada lado
+DET_ORDER = 0.1    # órdenes fraccionarios (alpha, beta, kappa, n): semiancho del intervalo <= 0.1
+ORDER_NAMES = ("alpha", "beta", "kappa")
+
+
+def _uncertainty(test, model, params, x, y, w):
+    """Intervalos de confianza del 95 % por linealización (matriz de Fisher a partir del jacobiano del residuo
+    relativo ponderado). Los parámetros con dimensiones se tratan en escala logarítmica (intervalo multiplicativo).
+    Supone que el modelo describe bien la forma de los datos: si los residuos muestran tendencia, el intervalo
+    real es más amplio. Un parámetro que el ajuste no puede fijar (p. ej. alpha ~ beta) da un intervalo enorme."""
+    from scipy.stats import t as student_t
+    names = list(params)
+    is_ord = [n in ORDER_NAMES or (model in ("PowerLaw", "HerschelBulkley", "Cross", "CarreauYasuda") and n in ("n", "a"))
+              for n in names]
+    sw = np.sqrt(w)
+    th0 = np.array([params[n] if o else np.log(params[n]) for n, o in zip(names, is_ord)], float)
+
+    def resid(th):
+        p = {n: (v if o else float(np.exp(v))) for n, v, o in zip(names, th, is_ord)}
+        return sw * (y - model_eval(test, model, p, x, ml=ML_FIT)) / y
+
+    n, k = len(y), len(names)
+    r0 = resid(th0)
+    J = np.empty((n, k))
+    for j in range(k):
+        h = 1e-5 if is_ord[j] else 1e-4
+        tp, tm = th0.copy(), th0.copy()
+        tp[j] += h
+        tm[j] -= h
+        J[:, j] = (resid(tp) - resid(tm)) / (2 * h)
+    out = {}
+    dof = max(n - k, 1)
+    s2 = float(r0 @ r0) / dof
+    q = float(student_t.ppf(0.975, dof))
+    with np.errstate(all="ignore"):
+        try:
+            if not np.all(np.isfinite(J)):
+                raise np.linalg.LinAlgError
+            # Var(theta_j) = s2 * sum_i V_ji^2 / lambda_i. Las direcciones con lambda ~ 0 son combinaciones de parámetros
+            # que los datos NO fijan (p. ej. alpha = beta, o un término que no aporta en la ventana medida): su varianza
+            # es infinita. Una pseudo-inversa las pondría en cero y haría parecer "determinados" esos parámetros.
+            lam, vec = np.linalg.eigh(J.T @ J)
+            null = lam <= 1e-10 * max(lam.max(), 1e-300)
+            var = np.empty(k)
+            for j in range(k):
+                var[j] = np.inf if np.any(vec[j, null] ** 2 > 1e-6) else s2 * float(np.sum(vec[j, ~null] ** 2 / lam[~null]))
+            se = np.sqrt(var)
+        except np.linalg.LinAlgError:
+            se = np.full(k, np.inf)
+    for j, name in enumerate(names):
+        v = float(params[name])
+        hw = q * se[j] if np.isfinite(se[j]) else np.inf
+        if is_ord[j]:
+            lo, hi = v - hw, v + hw
+            at_bound = name in ORDER_NAMES and (v < 1e-3 or v > 1 - 1e-3)   # en el límite (0 o 1), el intervalo no es válido
+            det = bool(np.isfinite(hw) and hw <= DET_ORDER and not at_bound)
+        else:
+            f = float(np.exp(hw)) if hw < 700 else np.inf
+            lo, hi = (v / f, v * f) if np.isfinite(f) else (0.0, np.inf)
+            det = bool(np.isfinite(f) and f <= DET_FACTOR)
+        out[name] = {"valor": v, "inf": float(lo) if np.isfinite(lo) else None, "sup": float(hi) if np.isfinite(hi) else None,
+                     "determinado": det}
+    return out
+
+
+def recommend(results, n_points):
+    """Modelo recomendado: el de menor BIC entre los que tienen TODOS sus parámetros determinados.
+    BIC = n ln(RSS_w / n) + k ln(n), con n = puntos ajustados (promedios por intervalo) y k = número de parámetros.
+    Penaliza los parámetros de más: entre dos modelos que ajustan casi igual gana el más simple."""
+    ok = [r for r in results if "error" not in r and r.get("rss_w") is not None and r["rss_w"] > 0]
+    if not ok:
+        return None
+    n = max(int(n_points), 2)
+    for r in ok:
+        r["k"] = len(r["params"])
+        r["bic"] = float(n * np.log(r["rss_w"] / n) + r["k"] * np.log(n))
+        r["todos_determinados"] = all(u["determinado"] for u in (r.get("incertidumbre") or {}).values())
+    det = [r for r in ok if r["todos_determinados"]]
+    pool = det or ok
+    best = min(pool, key=lambda r: r["bic"])
+    overall = min(ok, key=lambda r: r["bic"])
+    for r in ok:
+        r["delta_bic"] = r["bic"] - best["bic"]
+        r["recomendado"] = r is best
+    others = sorted((r for r in pool if r is not best), key=lambda r: r["bic"])
+    return {"modelo": best["model"], "k": best["k"], "con_parametros_determinados": bool(det),
+            "delta_bic_siguiente": (others[0]["bic"] - best["bic"]) if others else None,
+            "siguiente": others[0]["model"] if others else None,
+            "mejor_ajuste_sin_restriccion": overall["model"] if overall is not best else None,
+            "criterio": "menor BIC entre los modelos con todos sus parámetros determinados (intervalo de confianza del 95 %: "
+                        f"factor <= {DET_FACTOR:g} en módulos y viscosidades, semiancho <= {DET_ORDER:g} en órdenes)"}
+
+
 def _wloss(y, yhat, w):
     r = (y - yhat) / y
     v = float(np.sum(w * r ** 2))
@@ -359,6 +453,10 @@ def _fit_one(test, name, x, y, xd, n_guesses=None, w=None, x_all=None, y_all=Non
         "inicio": start,
         "avisos": _diagnostics(test, chosen, params, x),
     }
+    try:
+        out["incertidumbre"] = _uncertainty(test, chosen, params, x, y, w) if PYRHEO else None
+    except Exception:  # noqa
+        out["incertidumbre"] = None
     # métricas sobre TODAS las observaciones válidas (no solo los promedios ajustados)
     if x_all is not None:
         x_all, y_all = np.asarray(x_all, float), np.asarray(y_all, float)
