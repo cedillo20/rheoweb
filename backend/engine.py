@@ -6,6 +6,8 @@ Dos rutas:
 """
 import numpy as np
 from scipy.optimize import least_squares, minimize
+
+import varpro
 from scipy.special import gamma as _gamma
 
 IMPORT_ERROR=""
@@ -90,7 +92,8 @@ def _fit_scipy(test, model, x, y, restarts=10):
 
 ML_FIT = "Pade63"     # aproximación rápida para optimizar (la Padé 3/2 se degrada con alpha > 0.3)
 ML_EXACT = "Garrappa"  # método de Garrappa: error < 1e-6 % frente a la serie de alta precisión
-ML_TOL = 0.005         # si la Padé difiere más de 0.5 % del método exacto, se repule el ajuste con el exacto
+ML_TOL = 0.0005        # si la Padé difiere más de 0.05 % del método exacto, se repule el ajuste con el exacto
+_EVAL_LOG = []         # evaluaciones en que el método exacto falló y se usó la Padé (se reporta por modelo)
 
 
 def _module(test):
@@ -116,6 +119,8 @@ def model_eval(test, model, params, x, ml=ML_EXACT):
     """Evalúa un modelo de pyRheo con parámetros dados. Para SAOS devuelve G' y G'' concatenados."""
     if test == "creep" and model == "FractionalZenerSolidS":
         return _fzss_creep(params, x)
+    if model == "Cross" and "a" not in params:
+        params = {**params, "a": 1.0}  # pyRheo pide "a" aunque su ecuación de Cross no lo usa
     mod = _module(test)
     if model not in mod.MODEL_FUNCS:
         raise ValueError(f"Modelo '{model}' no disponible para esta respuesta.")
@@ -141,11 +146,12 @@ def model_eval(test, model, params, x, ml=ML_EXACT):
             raise
         # El algoritmo de Garrappa falla cuando el orden de la Mittag-Leffler es casi cero (p. ej. alpha - beta ~ 0
         # en Kelvin-Voigt fraccionario). En esa región la Padé 6/3 tiene error < 1e-8 %.
+        _EVAL_LOG.append(model)
         y = run(ML_FIT)
     return y
 
 
-def _polish(test, model, params, x, y, maxfev=250):
+def _polish(test, model, params, x, y, maxfev=250, w=None):
     """Reajuste local con la Mittag-Leffler exacta, partiendo de los parámetros obtenidos con la Padé."""
     names = list(params)
     frac = [n in ("alpha", "beta", "kappa") for n in names]
@@ -165,9 +171,11 @@ def _polish(test, model, params, x, y, maxfev=250):
     def from_th(th):
         return {n: (float(1 / (1 + np.exp(-v))) if f else float(np.exp(v))) for n, v, f in zip(names, th, frac)}
 
+    ww = np.ones_like(y) if w is None else w
+
     def cost(th):
         r = (y - model_eval(test, model, from_th(th), x)) / y
-        c = float(np.sum(r ** 2))
+        c = float(np.sum(ww * r ** 2))
         return c if np.isfinite(c) else 1e300
 
     th0 = to_th(params)
@@ -176,32 +184,7 @@ def _polish(test, model, params, x, y, maxfev=250):
     return (from_th(r.x), True) if r.fun < c0 else (dict(params), False)
 
 
-def _analytic_start(test, model, x, y):
-    """Valores iniciales exactos por linealización para los modelos que la admiten.
-    Maxwell relajación: ln G = ln G_s - t/tau ; Maxwell creep: J = 1/G_s + t/eta_s ;
-    Springpot: ln G = ln(V/Gamma(1-a)) - a ln t (relajación) y ln J = -ln(V Gamma(1+a)) + a ln t (creep).
-    pyRheo sortea los valores iniciales en un rango derivado de los datos y, con tiempos espaciados linealmente,
-    no encontraba la solución de Maxwell en relajación (R² = -0.49 con datos exactos)."""
-    try:
-        if model == "Maxwell" and test == "relaxation":
-            k, b = np.polyfit(x, np.log(y), 1)
-            return {"G_s": float(np.exp(b)), "eta_s": float(np.exp(b) * (-1 / k))} if k < 0 else None
-        if model == "Maxwell" and test == "creep":
-            k, b = np.polyfit(x, y, 1)
-            return {"G_s": float(1 / b), "eta_s": float(1 / k)} if k > 0 and b > 0 else None
-        if model == "SpringPot" and test in ("creep", "relaxation"):
-            k, b = np.polyfit(np.log(x), np.log(y), 1)
-            a = -k if test == "relaxation" else k
-            if not 0 < a < 1:
-                return None
-            V = np.exp(b) * _gamma(1 - a) if test == "relaxation" else 1 / (np.exp(b) * _gamma(1 + a))
-            return {"V": float(V), "alpha": float(a)}
-    except Exception:  # noqa
-        return None
-    return None
-
-
-def _fit_pyrheo(test, model, x, y, n_guesses=None):
+def _fit_pyrheo(test, model, x, y, n_guesses=None, w=None):
     """VERIFICAR: nombres de clases, argumentos y atributos según el repo/documentación de pyRheo."""
     cls = {"creep": CreepModel, "relaxation": RelaxationModel,
            "saos": SAOSModel, "steady": SteadyShearModel}[test]
@@ -209,6 +192,8 @@ def _fit_pyrheo(test, model, x, y, n_guesses=None):
     # SAOS y SteadyShear NO aceptan `mittag_leffler_type`; el algoritmo por defecto
     # de SAOS/Steady es Nelder-Mead y el de creep/relajacion es Powell.
     kw = dict(model=model, initial_guesses="random", num_initial_guesses=n_guesses or NUM_GUESSES)
+    if w is not None and not np.allclose(w, 1):
+        kw["cost_function"] = ("RSS_custom", y / np.sqrt(w))  # sum(((y - yhat) / (y / sqrt(w)))^2) = sum(w ((y - yhat)/y)^2)
     if test in ("creep", "relaxation"):
         kw.update(minimization_algorithm="Powell", mittag_leffler_type=ML_FIT)
     m = cls(**kw)
@@ -255,10 +240,14 @@ def fit_settings(test):
         s["mittag_leffler"] = (f"la optimización usa la aproximación {ML_FIT}; curvas, métricas y residuos se calculan con el método "
                                f"exacto ({ML_EXACT}). Si ambos difieren más de {ML_TOL * 100:g} % en los datos, los parámetros se "
                                "repulen con el método exacto (Nelder-Mead, máx. 250 evaluaciones).")
-    s["inicio_analitico"] = ("Maxwell y Springpot en creep y relajación también se ajustan desde valores iniciales exactos por "
-                             "linealización; se conserva el resultado de menor RSS_w")
+    s["proyeccion_de_variables"] = ("además de la búsqueda de pyRheo, cada modelo se ajusta calculando exactos (mínimos cuadrados no "
+                                    "negativos) los coeficientes lineales —módulos, viscosidades y cuasi-propiedades— y optimizando solo "
+                                    "los órdenes fraccionarios y el tiempo característico; se conserva el resultado de menor pérdida. "
+                                    "Evita los límites de pyRheo, que acotan viscosidades y cuasi-propiedades con un rango en unidades de módulo")
     s["correcciones_pyrheo"] = ["creep de FractionalZenerSolidS con el tiempo de retardo correcto (pyRheo 1.0.3 usa el de relajación)",
-                                "las curvas se evalúan con la misma función con la que se reportan las métricas"]
+                                "las curvas se evalúan con la misma función con la que se reportan las métricas",
+                                "límites dimensionales de viscosidades y cuasi-propiedades (ver proyeccion_de_variables)",
+                                "Cross: el parámetro 'a' no interviene en la ecuación de pyRheo; no se ajusta ni se reporta"]
     return s
 
 
@@ -277,30 +266,75 @@ def predict_response(model, params, target, x):
     return (y,)
 
 
-def _fit_one(test, name, x, y, xd, n_guesses=None):
-    """Ajusta un modelo y devuelve el dict de resultado (solo tipos simples, para poder cruzar procesos)."""
+def _normalize(model, params):
+    """Maxwell y Kelvin-Voigt fraccionarios tienen dos springpots intercambiables (en serie o en paralelo): el modelo con
+    (V, alpha) <-> (G, beta) es idéntico. Se reporta siempre con alpha >= beta, como en pyRheo y la literatura."""
+    if model in ("FractionalMaxwell", "FractionalKelvinVoigt") and params.get("beta", 0) > params.get("alpha", 1):
+        params = {**params, "V": params["G"], "G": params["V"], "alpha": params["beta"], "beta": params["alpha"]}
+    return params
+
+
+def _diagnostics(test, model, params, x):
+    """Señales de que los datos no determinan algún parámetro (el modelo se reduce a uno más simple)."""
+    out = []
+    for k, sym in (("alpha", "α"), ("beta", "β"), ("kappa", "κ")):
+        v = params.get(k)
+        if v is not None and v < 0.005:
+            out.append(f"{sym} ≈ 0: ese springpot se comporta como un resorte.")
+        elif v is not None and v > 0.995:
+            out.append(f"{sym} ≈ 1: ese springpot se comporta como un amortiguador.")
+    if "alpha" in params and "beta" in params and abs(params["alpha"] - params["beta"]) < 0.005:
+        out.append("α ≈ β: los dos springpots son casi iguales y el modelo se reduce a un Springpot; sus parámetros "
+                   "individuales no están determinados por los datos.")
+    tau_expr = {"Maxwell": lambda p: p["eta_s"] / p["G_s"], "FractionalMaxwellGel": lambda p: (p["V"] / p["G_s"]) ** (1 / p["alpha"]),
+                "FractionalZenerSolidS": lambda p: (p["V"] / p["G_s"]) ** (1 / p["alpha"]),
+                "FractionalMaxwell": lambda p: (p["V"] / p["G"]) ** (1 / (p["alpha"] - p["beta"])),
+                "FractionalMaxwellLiquid": lambda p: (p["eta_s"] / p["G"]) ** (1 / (1 - p["beta"]))}.get(model)
+    if tau_expr is not None and test in ("creep", "relaxation", "saos"):
+        try:
+            with np.errstate(all="ignore"):
+                tau = float(tau_expr(params))
+            lo, hi = (1 / np.max(x), 1 / np.min(x)) if test == "saos" else (np.min(x), np.max(x))
+            if np.isfinite(tau) and (tau > 100 * hi or tau < lo / 100):
+                out.append(f"El tiempo característico τ ≈ {tau:.3g} s queda muy fuera de la ventana medida "
+                           f"({lo:.3g}–{hi:.3g} s): los parámetros que dependen de él solo son cotas, no valores determinados.")
+        except Exception:  # noqa
+            pass
+    return out
+
+
+def _wloss(y, yhat, w):
+    r = (y - yhat) / y
+    v = float(np.sum(w * r ** 2))
+    return v if np.isfinite(v) else float("inf")
+
+
+def _fit_one(test, name, x, y, xd, n_guesses=None, w=None, x_all=None, y_all=None):
+    """Ajusta un modelo y devuelve el dict de resultado (solo tipos simples, para poder cruzar procesos).
+    w: pesos por punto (promedios por intervalo); x_all, y_all: todas las observaciones válidas, para métricas."""
+    w = np.ones_like(y) if w is None else np.asarray(w, float)
     ml, start = None, "aleatorio (pyRheo)"
+    del _EVAL_LOG[:]
     if PYRHEO:
-        params, _, chosen = _fit_pyrheo(test, name, x, y, n_guesses)
-        params = {k: float(v) for k, v in params.items()}
-        # pyRheo predice con la aproximación por defecto de cada función (no la usada al ajustar): se evalúa aquí
+        params, _, chosen = _fit_pyrheo(test, name, x, y, n_guesses, w)
+        params = {k: float(v) for k, v in params.items() if not (chosen == "Cross" and k == "a")}
+        loss = _wloss(y, model_eval(test, chosen, params, x), w)
+        # proyección de variables: coeficientes lineales exactos (evita los límites de pyRheo sin dimensiones correctas)
+        vp = varpro.fit(test, chosen, x, y, w)
+        if vp:
+            cand = vp[0]
+            c_loss = _wloss(y, model_eval(test, chosen, cand, x), w)
+            if c_loss < loss:
+                params, loss, start = cand, c_loss, "proyección de variables (coeficientes lineales exactos)"
         yhat = model_eval(test, chosen, params, x)
         if test in ("creep", "relaxation"):
             y_pade = model_eval(test, chosen, params, x, ml=ML_FIT)
             dev = float(np.nanmax(np.abs(y_pade / yhat - 1))) if np.all(np.isfinite(yhat)) else float("inf")
             ml = {"optimizacion": ML_FIT, "curvas_y_metricas": ML_EXACT, "desviacion_pade_pct": dev * 100, "repulido": False}
             if dev > ML_TOL:
-                params, ml["repulido"] = _polish(test, chosen, params, x, y)
+                params, ml["repulido"] = _polish(test, chosen, params, x, y, w=w)
                 yhat = model_eval(test, chosen, params, x)
-        # inicio analítico: si da menor RSS_w que la búsqueda aleatoria de pyRheo, se usa ese resultado
-        p0 = _analytic_start(test, chosen, x, y)
-        if p0:
-            cost = lambda p: float(np.sum(((y - model_eval(test, chosen, p, x)) / y) ** 2))
-            cand, _ = _polish(test, chosen, p0, x, y, maxfev=400)
-            c_cand, c_cur = cost(cand), cost(params)
-            if np.isfinite(c_cand) and (not np.isfinite(c_cur) or c_cand < c_cur):
-                params, start = cand, "analítico (linealización)"
-                yhat = model_eval(test, chosen, params, x)
+        params = _normalize(chosen, params)
         pred = lambda xx: model_eval(test, chosen, params, xx)
     else:
         params, pred = _fit_scipy(test, name, x, y)
@@ -308,27 +342,43 @@ def _fit_one(test, name, x, y, xd, n_guesses=None):
         yhat = pred(x)
     yd = pred(xd)
     split = lambda v: [v[:len(v) // 2], v[len(v) // 2:]] if test == "saos" else [v]
-    return {
+    out = {
         "requested": name, "model": chosen,
         "params": {k: float(v) for k, v in params.items()},
         "r2": _r2(y, yhat), "r2_log": _r2(np.log10(y), np.log10(np.abs(yhat) + 1e-300)),
-        "rss_w": float(np.sum(((y - yhat) / y) ** 2)),
+        "rss_w": _wloss(y, yhat, w),
         "curve_x": xd.tolist(), "curve_y": [c.tolist() for c in split(yd)],
-        # residuo relativo en cada punto medido, en %: (dato - modelo) / dato
+        # residuo relativo en cada punto ajustado, en %: (dato - modelo) / dato
         "resid": [[float(v) if np.isfinite(v) else None for v in c] for c in split((y - yhat) / y * 100.0)],
         "mittag_leffler": ml,
         "inicio": start,
+        "avisos": _diagnostics(test, chosen, params, x),
     }
+    # métricas sobre TODAS las observaciones válidas (no solo los promedios ajustados)
+    if x_all is not None:
+        x_all, y_all = np.asarray(x_all, float), np.asarray(y_all, float)
+        # con muchas filas, la Padé 6/3 se usa solo si ya se comprobó que coincide con el método exacto en estos parámetros
+        fast = ml is not None and len(x_all) > 5000 and ml["desviacion_pade_pct"] < ML_TOL * 100 and not ml["repulido"]
+        ya = model_eval(test, chosen, params, x_all, ml=ML_FIT if fast else ML_EXACT) if PYRHEO else pred(x_all)
+        r = np.abs((y_all - ya) / y_all) * 100
+        r = r[np.isfinite(r)]
+        out["todos"] = {"n": int(len(y_all)), "rms_pct": float(np.sqrt(np.mean(r ** 2))) if len(r) else None,
+                        "p95_pct": float(np.percentile(r, 95)) if len(r) else None,
+                        "evaluador": (ML_FIT + " (validado contra Garrappa en estos parámetros)") if fast else
+                                     (ML_EXACT if ml is not None else "forma cerrada")}
+    if ml is not None:
+        ml["evaluador_real"] = ML_EXACT if not _EVAL_LOG else f"{ML_FIT} en algunos puntos: {ML_EXACT} falló (orden de Mittag-Leffler ~ 0)"
+    return out
 
 
-def _worker(conn, test, name, x, y, xd, seed, n_guesses):
+def _worker(conn, test, name, x, y, xd, seed, n_guesses, w, x_all, y_all):
     import contextlib, io, warnings
     warnings.filterwarnings("ignore")
     try:
         # pyRheo genera sus valores iniciales con el generador global de NumPy: fijarlo hace el ajuste reproducible
         np.random.seed(seed)
         with contextlib.redirect_stdout(io.StringIO()):
-            conn.send(_fit_one(test, name, x, y, xd, n_guesses))
+            conn.send(_fit_one(test, name, x, y, xd, n_guesses, w, x_all, y_all))
     except Exception as e:  # noqa
         conn.send({"requested": name, "error": str(e)})
     finally:
@@ -345,10 +395,10 @@ SEEDS = tuple(a[0] for a in ATTEMPTS)
 RETRY_R2_LOG = 0.95  # si R2 log < este valor se reintenta con la siguiente semilla y se conserva el de menor RSS_w
 
 
-def _attempt(test, name, x, y, xd, seed, n_guesses, limit):
+def _attempt(test, name, x, y, xd, seed, n_guesses, limit, w=None, x_all=None, y_all=None):
     import multiprocessing as mp
     parent, child = mp.Pipe(duplex=False)
-    p = mp.Process(target=_worker, args=(child, test, name, x, y, xd, seed, n_guesses), daemon=True)
+    p = mp.Process(target=_worker, args=(child, test, name, x, y, xd, seed, n_guesses, w, x_all, y_all), daemon=True)
     p.start()
     child.close()
     if parent.poll(limit):
@@ -364,12 +414,14 @@ def _attempt(test, name, x, y, xd, seed, n_guesses, limit):
     return res
 
 
-def run_fit(test, x, ys, models):
+def run_fit(test, x, ys, models, w=None, x_all=None, ys_all=None):
     """x: array; ys: lista de arrays (1 para creep/relax/steady, 2 para SAOS: G', G'').
     Cada intento corre en su propio proceso con limite de tiempo y semilla fija (resultado reproducible).
     Si el ajuste sale pobre (R2 log < RETRY_R2_LOG) se repite con las semillas siguientes y se conserva el mejor."""
     import time
     y = np.concatenate(ys)
+    w = None if w is None else (np.concatenate([w, w]) if test == "saos" else np.asarray(w, float))
+    y_all = None if ys_all is None else np.concatenate(ys_all)
     xd = np.logspace(np.log10(x.min()), np.log10(x.max()), 200)
     out, t_start = [], time.time()
     for name in models:
@@ -380,7 +432,7 @@ def run_fit(test, x, ys, models):
                 if best is None:
                     best = {"requested": name, "error": "Omitido: se agotó el tiempo total de la solicitud. Ajusta menos modelos a la vez."}
                 break
-            res = _attempt(test, name, x, y, xd, seed, n_guesses, min(MODEL_TIMEOUT, left))
+            res = _attempt(test, name, x, y, xd, seed, n_guesses, min(MODEL_TIMEOUT, left), w, x_all, y_all)
             tried.append(seed)
             if "error" in res:
                 if best is None:
