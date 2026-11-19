@@ -145,6 +145,30 @@ def test_promedios_por_intervalo_y_metricas_sobre_todos_los_datos(weighting):
     assert r["params"]["alpha"] == pytest.approx(0.2, rel=1e-3)
 
 
+def test_recomienda_el_modelo_que_genero_los_datos():
+    # datos de Maxwell fraccionario (gel) con ruido de 0.1 %: debe recomendarlo frente a modelos más simples o con
+    # parámetros no determinados
+    rng = np.random.default_rng(1)
+    t = np.logspace(-1, 3, 120)
+    y = engine.model_eval("relaxation", "FractionalMaxwellGel", {"G_s": 20.0, "V": 100.0, "alpha": 0.25}, t) * (1 + 0.001 * rng.standard_normal(len(t)))
+    d = _fit_full("relaxation", t, y, ["SpringPot", "FractionalMaxwellGel", "FractionalMaxwell", "FractionalKelvinVoigt", "Maxwell"])
+    assert d["recomendacion"]["modelo"] == "FractionalMaxwellGel"
+    rec = next(r for r in d["results"] if r.get("recomendado"))
+    assert all(u["determinado"] for u in rec["incertidumbre"].values())
+    u = rec["incertidumbre"]["alpha"]
+    assert u["inf"] < 0.25 < u["sup"]
+
+
+def test_parametros_degenerados_no_se_marcan_determinados():
+    # datos de Springpot ajustados con Kelvin-Voigt fraccionario: alpha ~ beta, sus parámetros no están determinados
+    t = np.logspace(-1, 3, 120)
+    y = engine.model_eval("creep", "SpringPot", {"V": 18.0, "alpha": 0.07}, t)
+    d = _fit_full("creep", t, y, ["SpringPot", "FractionalKelvinVoigt"])
+    kv = next(r for r in d["results"] if r["model"] == "FractionalKelvinVoigt")
+    assert kv["todos_determinados"] is False
+    assert d["recomendacion"]["modelo"] == "SpringPot"
+
+
 def test_ponderacion_invalida():
     t = np.logspace(0, 2, 20)
     r = client.post("/api/fit", files={"file": ("s.csv", _csv(t=t, y=t))},
