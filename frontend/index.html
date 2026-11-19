@@ -8,6 +8,8 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:wght@500;600&family=Public+Sans:wght@400;500;600&display=swap">
 <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <style>
 :root{color-scheme:light;--bg:#ffffff;--panel:#fafcfb;--ink:#1c2a22;--mute:#5d6b63;--line:#d8e0da;--acc:#0b6b3a;--acc2:#c2571a;--hdr:#0b5a33;--hdr2:#8cc63f}
 *{box-sizing:border-box}
@@ -71,6 +73,17 @@ small{color:var(--mute)}
 .tabs button:focus-visible{outline-color:#fff}
 .g2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .plot3{height:520px;margin-bottom:10px}
+.pcards{display:grid;gap:14px}
+.pcard{border:1px solid color-mix(in srgb,var(--c) 35%,var(--line));border-left:5px solid var(--c);border-radius:6px;padding:12px 14px;
+  background:color-mix(in srgb,var(--c) 7%,#fff)}
+.pcard h3{margin:0 0 6px;font:600 15px "Public Sans",sans-serif;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.pcard h3 small{font-weight:400}
+.pcard .eq{overflow-x:auto;overflow-y:hidden;padding:2px 0;font-size:14px}
+.pcard .eq .lbl{font-size:12px;color:var(--mute)}
+.pcard table{margin-top:6px;background:rgba(255,255,255,.65)}
+.pcard td{white-space:normal}.pcard td:nth-child(2){white-space:nowrap}
+.pcard tr.imp td:first-child,.pcard tr.imp td:nth-child(2){font-weight:700}
+.pcard tr.der td{font-style:italic;color:var(--mute)}
 </style>
 </head>
 <body>
@@ -453,9 +466,108 @@ function show(d, scroll = true) {
   $("metrics").innerHTML = `<table><tr><th>Modelo</th><th>R²</th><th>R² log</th><th>RSS<sub>w</sub></th></tr>` + d.results.map(r => r.error
     ? `<tr><td>${esc(pretty(r.requested))}</td><td colspan="3">${esc(r.error)}${r.intentos > 1 ? ` <small>(${r.intentos} intentos)</small>` : ""}</td></tr>`
     : `<tr><td>${esc(pretty(r.model))}${r.requested === "auto" ? " <small>(auto)</small>" : ""}${r.semilla !== undefined ? `<br><small>semilla ${r.semilla}${r.intentos > 1 ? ` · ${r.intentos} intentos` : ""}</small>` : ""}</td><td>${fmt(r.r2)}</td><td>${fmt(r.r2_log)}</td><td>${fmt(r.rss_w)}</td></tr>`).join("") + `</table>`;
-  $("params").innerHTML = `<table><tr><th>Modelo</th><th>Parámetro</th><th>Valor</th></tr>` + ok.flatMap(r =>
-    Object.entries(r.params).map(([k, v]) => `<tr><td>${esc(pretty(r.model))}</td><td>${esc(k)}</td><td>${fmt(v)}</td></tr>`)).join("") + `</table>`;
+  renderParams(d, ok);
   $("res").hidden = false; if (scroll) $("res").scrollIntoView({behavior:"smooth", block:"start"});
+}
+
+// ---------- Tabla de parámetros: una tarjeta por modelo, con el color de su curva ----------
+// Símbolos (HTML y LaTeX) de los nombres de parámetros de pyRheo
+const PSYM = {G_s:["G<sub>s</sub>","G_{s}"], G_p:["G<sub>p</sub>","G_{p}"], eta_s:["η<sub>s</sub>","\\eta_{s}"], eta_p:["η<sub>p</sub>","\\eta_{p}"],
+  alpha:["α","\\alpha"], beta:["β","\\beta"], kappa:["κ","\\kappa"], V:["V","V"], G:["G","G"], K:["K","K"],
+  sigma_y:["σ<sub>y</sub>","\\sigma_{y}"], k:["k","k"], n:["n","n"], eta_inf:["η<sub>∞</sub>","\\eta_{\\infty}"], eta_zero:["η<sub>0</sub>","\\eta_{0}"], a:["a","a"]};
+// En negritas: órdenes fraccionarios y propiedades con significado físico directo (módulos, viscosidades, cedencia, índice de flujo)
+const PIMP = new Set(["alpha", "beta", "kappa", "G_s", "G_p", "eta_s", "eta_p", "sigma_y", "n", "eta_zero"]);
+function pdesc(model, k) {
+  const D = {G_s: model === "FractionalZenerSolidS" ? "módulo del resorte de la rama de Maxwell" : "módulo del resorte",
+    G_p:"módulo del resorte en paralelo (módulo de equilibrio)", eta_s:"viscosidad del amortiguador", eta_p:"viscosidad",
+    V:"cuasi-propiedad del springpot de orden α", G:"cuasi-propiedad del springpot de orden β", K:"cuasi-propiedad del springpot de orden κ",
+    alpha:"orden fraccionario (0 = resorte, 1 = amortiguador)", beta:"orden fraccionario (0 = resorte, 1 = amortiguador)", kappa:"orden fraccionario (0 = resorte, 1 = amortiguador)",
+    sigma_y:"esfuerzo de cedencia", n:"índice de flujo", eta_inf:"viscosidad a velocidad de corte infinita", eta_zero:"viscosidad a velocidad de corte cero",
+    k:(model === "PowerLaw" || model === "HerschelBulkley") ? "índice de consistencia" : "constante de tiempo",
+    a:model === "Cross" ? "no interviene en la ecuación de Cross de pyRheo (su valor ajustado no tiene significado)" : "parámetro de transición de Yasuda"};
+  if (model === "Bingham" || model === "Casson") D.eta_p = "viscosidad plástica";
+  return D[k] || "";
+}
+// Unidades: solo se conocen en archivos FIME (MPa y s); en archivos genéricos dependen de los datos
+function punit(model, k) {
+  if (["alpha", "beta", "kappa"].includes(k)) return "—";
+  return {G_s:"MPa", G_p:"MPa", eta_s:"MPa·s", eta_p:"MPa·s", V:"MPa·s<sup>α</sup>", G:"MPa·s<sup>β</sup>", K:"MPa·s<sup>κ</sup>"}[k] || "";
+}
+// Ecuaciones (verificadas contra el código de pyRheo). «expr» se sustituye por el símbolo o por el valor ajustado.
+const EQ = {
+  "creep:Maxwell": String.raw`\frac{1}{«G_s»}+\frac{t}{«eta_s»}`,
+  "creep:SpringPot": String.raw`\frac{t^{«alpha»}}{«V»\,\Gamma(«1+alpha»)}`,
+  "creep:FractionalMaxwellGel": String.raw`\frac{1}{«G_s»}+\frac{t^{«alpha»}}{«V»\,\Gamma(«1+alpha»)}`,
+  "creep:FractionalMaxwellLiquid": String.raw`\frac{t}{«eta_s»}+\frac{t^{«beta»}}{«G»\,\Gamma(«1+beta»)}`,
+  "creep:FractionalMaxwell": String.raw`\frac{t^{«alpha»}}{«V»\,\Gamma(«1+alpha»)}+\frac{t^{«beta»}}{«G»\,\Gamma(«1+beta»)}`,
+  "creep:FractionalKelvinVoigt": String.raw`\frac{t^{«alpha»}}{«V»}\,E_{«alpha-beta»,\,«1+alpha»}\!\left(-\frac{«G»}{«V»}\,t^{«alpha-beta»}\right)`,
+  "creep:FractionalZener": String.raw`\mathcal{L}^{-1}\!\left\{\frac{1}{s}\,\frac{«V»s^{«alpha»}+«G»s^{«beta»}}{«V»«G»\,s^{«alpha+beta»}+«K»s^{«kappa»}\left(«V»s^{«alpha»}+«G»s^{«beta»}\right)}\right\}`,
+  "relaxation:Maxwell": String.raw`«G_s»\,\exp\!\left(-\frac{«G_s»}{«eta_s»}\,t\right)`,
+  "relaxation:SpringPot": String.raw`\frac{«V»\,t^{-«alpha»}}{\Gamma(«1-alpha»)}`,
+  "relaxation:FractionalMaxwellGel": String.raw`«G_s»\,E_{«alpha»}\!\left(-\frac{«G_s»}{«V»}\,t^{«alpha»}\right)`,
+  "relaxation:FractionalMaxwellLiquid": String.raw`«G»\,t^{-«beta»}\,E_{«1-beta»,\,«1-beta»}\!\left(-\frac{«G»}{«eta_s»}\,t^{«1-beta»}\right)`,
+  "relaxation:FractionalMaxwell": String.raw`«G»\,t^{-«beta»}\,E_{«alpha-beta»,\,«1-beta»}\!\left(-\frac{«G»}{«V»}\,t^{«alpha-beta»}\right)`,
+  "relaxation:FractionalKelvinVoigt": String.raw`\frac{«V»\,t^{-«alpha»}}{\Gamma(«1-alpha»)}+\frac{«G»\,t^{-«beta»}}{\Gamma(«1-beta»)}`,
+  "relaxation:FractionalZenerSolidS": String.raw`«G_p»+«G_s»\,E_{«alpha»}\!\left(-\frac{«G_s»}{«V»}\,t^{«alpha»}\right)`,
+  "saos:Maxwell": String.raw`\frac{«G_s»\,i\omega\,«eta_s/G_s»}{1+i\omega\,«eta_s/G_s»}`,
+  "saos:SpringPot": String.raw`«V»\,(i\omega)^{«alpha»}`,
+  "saos:FractionalMaxwellGel": String.raw`\frac{«V»(i\omega)^{«alpha»}\,«G_s»}{«V»(i\omega)^{«alpha»}+«G_s»}`,
+  "saos:FractionalMaxwellLiquid": String.raw`\frac{«G»(i\omega)^{«beta»}\,«eta_s»\,i\omega}{«G»(i\omega)^{«beta»}+«eta_s»\,i\omega}`,
+  "saos:FractionalMaxwell": String.raw`\frac{«V»(i\omega)^{«alpha»}\,«G»(i\omega)^{«beta»}}{«V»(i\omega)^{«alpha»}+«G»(i\omega)^{«beta»}}`,
+  "saos:FractionalKelvinVoigt": String.raw`«V»(i\omega)^{«alpha»}+«G»(i\omega)^{«beta»}`,
+  "saos:FractionalZener": String.raw`«K»(i\omega)^{«kappa»}+\frac{«V»(i\omega)^{«alpha»}\,«G»(i\omega)^{«beta»}}{«V»(i\omega)^{«alpha»}+«G»(i\omega)^{«beta»}}`,
+  "steady:HerschelBulkley": String.raw`\frac{«sigma_y»}{\dot\gamma}+«k»\,\dot\gamma^{«n-1»}`,
+  "steady:Bingham": String.raw`\frac{«sigma_y»}{\dot\gamma}+«eta_p»`,
+  "steady:PowerLaw": String.raw`«k»\,\dot\gamma^{«n-1»}`,
+  "steady:CarreauYasuda": String.raw`«eta_inf»+\left(«eta_zero»-«eta_inf»\right)\left[1+\left(«k»\,\dot\gamma\right)^{«a»}\right]^{«(n-1)/a»}`,
+  "steady:Cross": String.raw`«eta_inf»+\frac{«eta_zero»-«eta_inf»}{1+\left(«k»\,\dot\gamma\right)^{«n»}}`,
+  "steady:Casson": String.raw`\left(\sqrt{\frac{«sigma_y»}{\dot\gamma}}+\sqrt{«eta_p»}\right)^{2}`,
+};
+// Tiempo característico que usa pyRheo (derivado de los parámetros)
+const TAU = {Maxwell:"eta_s/G_s", Zener:"eta_s/G_s", FractionalMaxwellGel:"(V/G_s)**(1/alpha)", FractionalZenerSolidS:"(V/G_s)**(1/alpha)",
+  FractionalMaxwell:"(V/G)**(1/(alpha-beta))", FractionalMaxwellLiquid:"(eta_s/G)**(1/(1-beta))"};
+const TAU_TEX = {Maxwell:String.raw`\tau=\eta_{s}/G_{s}`, Zener:String.raw`\tau=\eta_{s}/G_{s}`, FractionalMaxwellGel:String.raw`\tau=(V/G_{s})^{1/\alpha}`,
+  FractionalZenerSolidS:String.raw`\tau=(V/G_{s})^{1/\alpha}`, FractionalMaxwell:String.raw`\tau=(V/G)^{1/(\alpha-\beta)}`, FractionalMaxwellLiquid:String.raw`\tau=(\eta_{s}/G)^{1/(1-\beta)}`};
+const texNum = v => {
+  if (!isFinite(v)) return String.raw`\text{—}`;
+  if (v !== 0 && (Math.abs(v) >= 1e4 || Math.abs(v) < 1e-3)) {
+    const e = Math.floor(Math.log10(Math.abs(v))), m = v / Math.pow(10, e);
+    return `${Number(m.toPrecision(4))}\\times10^{${e}}`;
+  }
+  return String(Number(v.toPrecision(4)));
+};
+const evalExpr = (expr, P) => Function(...Object.keys(P), `return (${expr});`)(...Object.values(P));
+function fillEq(tpl, P, numeric) {
+  return tpl.replace(/«([^»]+)»/g, (_, expr) => {
+    if (numeric) return texNum(evalExpr(expr, P));
+    return expr.replace(/[A-Za-z_]\w*/g, n => PSYM[n] ? PSYM[n][1] : n).replace(/\*\*/g, "^");
+  });
+}
+const katexOk = () => typeof katex !== "undefined";
+const tex = (src, display = true) => katexOk() ? katex.renderToString(src, {throwOnError:false, displayMode:display}) : `<code>${esc(src)}</code>`;
+function renderParams(d, ok) {
+  const tens = d.modo === "tension";
+  const lhs = {creep:tens ? "D(t)" : "J(t)", relaxation:tens ? "E(t)" : "G(t)", saos:tens ? "E^{*}(\\omega)" : "G^{*}(\\omega)", steady:"\\eta(\\dot\\gamma)"}[d.test] || "y";
+  const cards = ok.map((r, k) => {
+    const P = r.params, key = `${d.test}:${r.model}`, tpl = EQ[key];
+    const eq = tpl ? `<div class="eq"><span class="lbl">Ecuación del modelo</span>${tex(`${lhs}=${fillEq(tpl, P, false)}`)}</div>
+      <div class="eq"><span class="lbl">Con los parámetros ajustados${r.model === "FractionalZener" && d.test === "creep" ? " (inversión numérica de Laplace)" : ""}</span>${tex(`${lhs}=${fillEq(tpl, P, true)}`)}</div>` : "";
+    const rows = Object.entries(P).map(([n, v]) => `<tr class="${PIMP.has(n) ? "imp" : ""}"><td>${PSYM[n] ? PSYM[n][0] : esc(n)}</td><td>${fmt(v)}</td>` +
+      (tens ? `<td>${punit(r.model, n)}</td>` : "") + `<td>${esc(pdesc(r.model, n))}</td></tr>`).join("");
+    let der = "";
+    if (TAU[r.model] && d.test !== "steady") {
+      const tv = evalExpr(TAU[r.model], P);
+      der = `<tr class="der"><td>τ</td><td>${fmt(tv)}</td>${tens ? "<td>s</td>" : ""}<td>tiempo característico (derivado): ${tex(TAU_TEX[r.model], false)}</td></tr>`;
+    }
+    const ml = d.test.match(/creep|relaxation/) && /E_\{/.test(tpl || "") ? "<br><small>E<sub>a,b</sub>(z): función de Mittag-Leffler, evaluada con el método exacto de Garrappa.</small>" : "";
+    return `<div class="pcard" style="--c:${COLORS[k % COLORS.length]}"><h3><span style="color:var(--c)">●</span>${esc(pretty(r.model))}` +
+      `<small>R² log ${fmt(r.r2_log)} · RSS<sub>w</sub> ${fmt(r.rss_w)}</small></h3>${eq}` +
+      `<div class="scroll"><table><tr><th>Parámetro</th><th>Valor</th>${tens ? "<th>Unidades</th>" : ""}<th>Significado</th></tr>${rows}${der}</table></div>${ml}</div>`;
+  }).join("");
+  $("params").innerHTML = `<div class="pcards">${cards}</div><small>En negritas: órdenes fraccionarios y propiedades con significado físico directo (módulos, viscosidades, esfuerzo de cedencia, índice de flujo). ` +
+    `V, G y K de los springpots son cuasi-propiedades: sus unidades dependen del orden fraccionario.` + (tens ? " Ensayo en tensión: los módulos son de tensión aunque pyRheo los nombre G." : " Unidades: las de tus datos.") + `</small>`;
+  // si KaTeX aún no termina de cargar, se vuelve a dibujar cuando esté listo
+  if (!katexOk()) setTimeout(() => { if (katexOk() && last === d) renderParams(d, ok); }, 800);
 }
 
 // ---------- Descargas ----------
